@@ -1,0 +1,116 @@
+use anyhow::Context;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{debug, warn};
+
+use terminal_relay_core::protocol::{
+    RegisterRequest, RegisterResponse, RelayMessage, decode_relay, encode_relay,
+};
+
+pub struct RelayConnection {
+    sender: mpsc::UnboundedSender<RelayMessage>,
+    receiver: mpsc::UnboundedReceiver<RelayMessage>,
+}
+
+impl RelayConnection {
+    pub async fn connect(
+        url: &str,
+        register: RegisterRequest,
+    ) -> anyhow::Result<(Self, RegisterResponse)> {
+        let (ws, _) = connect_async(url)
+            .await
+            .with_context(|| format!("failed connecting to relay url {url}"))?;
+        let (mut sink, mut stream) = ws.split();
+
+        let bytes = encode_relay(&RelayMessage::Register(register))?;
+        sink.send(Message::Binary(bytes.into()))
+            .await
+            .context("failed to send register frame")?;
+
+        let first = stream
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("relay disconnected during registration"))??;
+
+        let response = match first {
+            Message::Binary(bytes) => match decode_relay(&bytes)? {
+                RelayMessage::Registered(registered) => registered,
+                RelayMessage::Error(err) => {
+                    return Err(anyhow::anyhow!(
+                        "relay registration rejected: {}",
+                        err.message
+                    ));
+                }
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "unexpected relay response during registration: {other:?}"
+                    ));
+                }
+            },
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "unexpected non-binary relay response during registration"
+                ));
+            }
+        };
+
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<RelayMessage>();
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<RelayMessage>();
+
+        tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                match encode_relay(&message) {
+                    Ok(bytes) => {
+                        if sink.send(Message::Binary(bytes.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "failed encoding relay frame");
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            while let Some(frame) = stream.next().await {
+                match frame {
+                    Ok(Message::Binary(bytes)) => match decode_relay(&bytes) {
+                        Ok(message) => {
+                            if inbound_tx.send(message).is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "failed decoding relay frame");
+                        }
+                    },
+                    Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                    Ok(Message::Close(_)) => break,
+                    Ok(_) => {}
+                    Err(err) => {
+                        debug!(error = %err, "relay stream terminated");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok((
+            Self {
+                sender: outbound_tx,
+                receiver: inbound_rx,
+            },
+            response,
+        ))
+    }
+
+    pub fn sender(&self) -> mpsc::UnboundedSender<RelayMessage> {
+        self.sender.clone()
+    }
+
+    pub async fn recv(&mut self) -> Option<RelayMessage> {
+        self.receiver.recv().await
+    }
+}
