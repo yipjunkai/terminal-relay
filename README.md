@@ -80,7 +80,7 @@ terminal-relay sessions           # List active/persisted sessions
 | Development | `wss://dev-relay.terminal-relay.dev/ws` | Beta testers               |
 | Local       | `ws://localhost:8080/ws`                | Contributors / self-hosted |
 
-The relay URL is determined by build profile. Users never configure it.
+The relay URL defaults to production. Override with `TERMINAL_RELAY_URL` env var for development or self-hosted use.
 
 ### Protocol
 
