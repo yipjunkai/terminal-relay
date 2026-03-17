@@ -9,12 +9,29 @@
 - [ ] Add authn/authz and tenant isolation for the hosted relay (API keys, account system, or anonymous with rate limits).
 - [ ] Add a maximum session count and per-IP session limits on the relay to prevent abuse.
 - [ ] Enrich the `/healthz` endpoint to return structured JSON with session count, uptime, and server version.
+- [ ] Add multi-region relay support with geo-routing so clients connect to the nearest relay for lower latency.
 
 ## Clients
 
-- [ ] Build a web client (xterm.js + WebSocket + WebCrypto) that supports encrypted attach, bidirectional input, and terminal resize.
-- [ ] Build a mobile client (iOS/Android) with QR pairing, fingerprint verification UI, and responsive terminal rendering.
-- [ ] Add push notification providers (APNS, FCM, WebPush) and wire them to secure session events.
+- [ ] Build a web client (xterm.js + WebSocket + WebCrypto) with encrypted attach, bidirectional input, terminal resize, and responsive layout for mobile browsers.
+- [ ] Add PWA support (manifest, service worker, home screen install) for quick access from mobile home screens.
+- [ ] Build native iOS app (Swift) with speech-to-code: on-device speech recognition that converts voice commands into coding actions (refactor, commit, debug) sent as encrypted `PtyInput` to the host session.
+- [ ] Build native Android app (Kotlin) with the same speech-to-code functionality, using on-device ML Kit speech recognition.
+- [ ] Add a `VoiceCommand` variant to `SecureMessage` for structured voice-to-action messages (distinct from raw `PtyInput`) so the host can interpret intent rather than raw text.
+- [ ] Add push notifications via APNS (iOS) and FCM (Android) for session events (peer connected, session ended, tool output idle).
+- [ ] Generate shareable web URLs (e.g. `https://terminal-relay.dev/s/<token>`) that open the web client with pairing info embedded, so the remote side doesn't need the CLI installed.
+
+## User experience
+
+- [ ] Add a first-run setup flow: detect installed AI tools, confirm default tool, display a quick-start summary.
+- [ ] Add human-readable session names (e.g. `claude-backend-a3f`) instead of raw UUIDs in CLI output and QR codes.
+- [ ] Add a user config file (`~/.terminal-relay/config.toml`) for default tool, default args, and preferences.
+- [ ] Add shell completions generation (`terminal-relay completions bash/zsh/fish`).
+- [ ] Add auto-update check on startup: warn the user if a newer CLI version is available (with `--no-update-check` to suppress).
+- [ ] Add a connection quality indicator on the attach side (latency, connection state) rendered in a status bar.
+- [ ] Add read-only attach mode (`--read-only`) for demos and presentations where the remote side can only watch.
+- [ ] Add session idle timeout: automatically stop sessions after configurable inactivity (default 1 hour).
+- [ ] Add colored/formatted CLI output for session status, pairing info, and error messages instead of raw `println!`.
 
 ## Security
 
@@ -33,6 +50,7 @@
 - [ ] Notify connected peers before removing expired sessions in the cleanup loop.
 - [ ] Handle SIGTERM (not just SIGINT) on the host for clean shutdown in containers.
 - [ ] Send a `SessionEnded { exit_code }` message to the attached client when the PTY child exits.
+- [ ] Add a circular scrollback buffer on the host (e.g. last 100KB) so clients reconnecting mid-session get caught up with recent output.
 
 ## Performance
 
@@ -48,6 +66,8 @@
 - [ ] Add `--version` flag to the CLI (`#[command(version)]`).
 - [ ] Show a status indicator on the attach side when the secure channel is not yet established, instead of silently dropping input.
 - [ ] Strengthen session persistence and recovery by restoring active host sessions after CLI restart.
+- [ ] Add clipboard support: allow copy/paste between the remote client and the host PTY via an encrypted `SecureMessage` variant.
+- [ ] Add a daemon/background mode (`terminal-relay start --daemon`) that detaches from the terminal and runs the session in the background.
 
 ## Code quality
 
@@ -62,6 +82,7 @@
 - [ ] Implement version range negotiation (client sends min/max, server selects) instead of strict equality on `PROTOCOL_VERSION`.
 - [ ] Add forward-compatible extensibility to the wire format so new `SecureMessage` variants don't break old clients.
 - [ ] Actually send `VersionNotice` when peers connect with older versions.
+- [ ] Add a `Clipboard`, `SessionEnded`, and `ReadOnly` variant to `SecureMessage` to support new features without breaking the protocol.
 
 ## Packaging & distribution
 
@@ -69,6 +90,9 @@
 - [ ] Add crate metadata (`description`, `repository`, `homepage`, `keywords`, `authors`) to all `Cargo.toml` files.
 - [ ] Publish prebuilt binaries for macOS (Intel + Apple Silicon), Linux (x64 + ARM64), and Windows (x64). Set up CI release pipeline.
 - [ ] Add `cargo install terminal-relay` support (publish `terminal-relay-cli` to crates.io).
+- [ ] Add Homebrew formula and tap (`brew install terminal-relay`).
+- [ ] Add install script (`curl -fsSL https://terminal-relay.dev/install.sh | sh`) for quick onboarding.
 - [ ] Add optional Windows PTY support and CI coverage for macOS/Linux/Windows matrices.
 - [ ] Add documentation to `docs/`: protocol spec, architecture overview, deployment guide.
 - [ ] Add structured observability (metrics, traces, logs) for relay latency, dropped frames, reconnect attempts, and PTY health.
+- [ ] Add opt-in anonymous usage telemetry (session count, tool usage, OS) to inform development priorities.
