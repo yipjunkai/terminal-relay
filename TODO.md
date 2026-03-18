@@ -71,7 +71,8 @@
 
 ## Code quality
 
-- [ ] Add unit tests for `crypto.rs` (seal/open roundtrip, replay rejection, nonce exhaustion), `pairing.rs` (URI roundtrip, malformed input), `protocol.rs` (encode/decode all variants), `relay.rs` (registration, cleanup, version validation), and `state.rs` (save/load roundtrip).
+- [x] Add unit tests for `crypto.rs` (seal/open roundtrip, replay rejection, nonce exhaustion, key derivation symmetry, fingerprint determinism), `pairing.rs` (URI roundtrip, malformed input, code format), and `protocol.rs` (encode/decode all variants, garbage rejection). 51 tests total.
+- [ ] Add unit tests for `relay.rs` (registration, cleanup, version validation) and `state.rs` (save/load roundtrip).
 - [ ] Add integration tests for relay registration, encrypted handshake, reconnect/resume, and replay protection.
 - [ ] Extract duplicated functions (`now_millis`, `send_handshake`, `send_peer_frame`) from `host.rs` and `attach.rs` into a shared module.
 - [ ] Remove or wire up `#[allow(dead_code)]` items in `state.rs` (`load()`, `ensure_path_exists()`).

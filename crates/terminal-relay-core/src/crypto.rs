@@ -1,9 +1,9 @@
 use aes_gcm::{
-    Aes256Gcm,
     aead::{Aead, KeyInit},
+    Aes256Gcm,
 };
 use hkdf::Hkdf;
-use rand::{RngCore, thread_rng};
+use rand::{thread_rng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -11,7 +11,7 @@ use zeroize::Zeroize;
 use crate::{
     error::{CoreError, CoreResult},
     protocol::{
-        PeerRole, SealedFrame, SecureMessage, decode_secure_message, encode_secure_message,
+        decode_secure_message, encode_secure_message, PeerRole, SealedFrame, SecureMessage,
     },
 };
 
@@ -135,4 +135,269 @@ fn nonce_from_counter(counter: u64) -> [u8; 12] {
     let mut nonce = [0_u8; 12];
     nonce[4..].copy_from_slice(&counter.to_be_bytes());
     nonce
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::SecureMessage;
+
+    /// Helper: create a Host/Client SecureChannel pair from a fresh key exchange.
+    fn make_channel_pair() -> (SecureChannel, SecureChannel) {
+        let host_kp = generate_key_pair();
+        let client_kp = generate_key_pair();
+        let session_id = "test-session-id";
+
+        let host_keys =
+            derive_session_keys(PeerRole::Host, session_id, host_kp.secret, client_kp.public)
+                .unwrap();
+
+        let client_keys = derive_session_keys(
+            PeerRole::Client,
+            session_id,
+            client_kp.secret,
+            host_kp.public,
+        )
+        .unwrap();
+
+        (
+            SecureChannel::new(host_keys),
+            SecureChannel::new(client_keys),
+        )
+    }
+
+    #[test]
+    fn seal_open_roundtrip() {
+        let (mut host, mut client) = make_channel_pair();
+
+        let msg = SecureMessage::PtyOutput(b"hello world".to_vec());
+        let sealed = host.seal(&msg).unwrap();
+        let opened = client.open(&sealed).unwrap();
+
+        match opened {
+            SecureMessage::PtyOutput(data) => assert_eq!(data, b"hello world"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seal_open_bidirectional() {
+        let (mut host, mut client) = make_channel_pair();
+
+        // Host -> Client
+        let sealed = host
+            .seal(&SecureMessage::PtyOutput(b"from host".to_vec()))
+            .unwrap();
+        let opened = client.open(&sealed).unwrap();
+        match opened {
+            SecureMessage::PtyOutput(data) => assert_eq!(data, b"from host"),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Client -> Host
+        let sealed = client
+            .seal(&SecureMessage::PtyInput(b"from client".to_vec()))
+            .unwrap();
+        let opened = host.open(&sealed).unwrap();
+        match opened {
+            SecureMessage::PtyInput(data) => assert_eq!(data, b"from client"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seal_open_all_message_types() {
+        let (mut host, mut client) = make_channel_pair();
+
+        let messages: Vec<SecureMessage> = vec![
+            SecureMessage::PtyInput(b"input".to_vec()),
+            SecureMessage::PtyOutput(b"output".to_vec()),
+            SecureMessage::Resize {
+                cols: 120,
+                rows: 40,
+            },
+            SecureMessage::Heartbeat,
+            SecureMessage::VersionNotice {
+                minimum_version: "0.2.0".to_string(),
+            },
+            SecureMessage::Notification(crate::protocol::PushNotification {
+                title: "Test".to_string(),
+                body: "Hello".to_string(),
+            }),
+        ];
+
+        for msg in &messages {
+            let sealed = host.seal(msg).unwrap();
+            let _ = client.open(&sealed).unwrap();
+        }
+    }
+
+    #[test]
+    fn replay_rejected() {
+        let (mut host, mut client) = make_channel_pair();
+
+        let msg = SecureMessage::Heartbeat;
+        let sealed = host.seal(&msg).unwrap();
+
+        // First open succeeds
+        client.open(&sealed).unwrap();
+
+        // Replaying the same frame fails
+        let err = client.open(&sealed).unwrap_err();
+        assert!(matches!(err, CoreError::ReplayDetected));
+    }
+
+    #[test]
+    fn out_of_order_rejected() {
+        let (mut host, mut client) = make_channel_pair();
+
+        let frame0 = host.seal(&SecureMessage::Heartbeat).unwrap();
+        let frame1 = host.seal(&SecureMessage::Heartbeat).unwrap();
+        let frame2 = host.seal(&SecureMessage::Heartbeat).unwrap();
+
+        // Accept frame2 first (skip ahead)
+        client.open(&frame2).unwrap();
+
+        // frame0 and frame1 should be rejected (nonce <= last_seen)
+        assert!(matches!(
+            client.open(&frame0),
+            Err(CoreError::ReplayDetected)
+        ));
+        assert!(matches!(
+            client.open(&frame1),
+            Err(CoreError::ReplayDetected)
+        ));
+    }
+
+    #[test]
+    fn skipped_nonces_accepted() {
+        let (mut host, mut client) = make_channel_pair();
+
+        let frame0 = host.seal(&SecureMessage::Heartbeat).unwrap();
+        let _frame1 = host.seal(&SecureMessage::Heartbeat).unwrap(); // skip this one
+        let frame2 = host.seal(&SecureMessage::Heartbeat).unwrap();
+
+        client.open(&frame0).unwrap();
+        // Skipping frame1, frame2 should still work (nonce 2 > 0)
+        client.open(&frame2).unwrap();
+    }
+
+    #[test]
+    fn wrong_key_fails_to_decrypt() {
+        let (mut host, _client) = make_channel_pair();
+        let (_, mut wrong_client) = make_channel_pair();
+
+        let sealed = host.seal(&SecureMessage::Heartbeat).unwrap();
+        assert!(wrong_client.open(&sealed).is_err());
+    }
+
+    #[test]
+    fn nonce_increments() {
+        let (mut host, mut client) = make_channel_pair();
+
+        for expected_nonce in 0..10u64 {
+            let sealed = host.seal(&SecureMessage::Heartbeat).unwrap();
+            assert_eq!(sealed.nonce, expected_nonce);
+            client.open(&sealed).unwrap();
+        }
+    }
+
+    #[test]
+    fn key_derivation_host_client_symmetric() {
+        let host_kp = generate_key_pair();
+        let client_kp = generate_key_pair();
+        let session_id = "symmetric-test";
+
+        let host_keys =
+            derive_session_keys(PeerRole::Host, session_id, host_kp.secret, client_kp.public)
+                .unwrap();
+
+        let client_keys = derive_session_keys(
+            PeerRole::Client,
+            session_id,
+            client_kp.secret,
+            host_kp.public,
+        )
+        .unwrap();
+
+        // Host's TX should be Client's RX and vice versa
+        assert_eq!(host_keys.tx, client_keys.rx);
+        assert_eq!(host_keys.rx, client_keys.tx);
+    }
+
+    #[test]
+    fn different_sessions_produce_different_keys() {
+        let host_kp = generate_key_pair();
+        let client_kp = generate_key_pair();
+
+        let keys_a = derive_session_keys(
+            PeerRole::Host,
+            "session-a",
+            host_kp.secret,
+            client_kp.public,
+        )
+        .unwrap();
+
+        let keys_b = derive_session_keys(
+            PeerRole::Host,
+            "session-b",
+            host_kp.secret,
+            client_kp.public,
+        )
+        .unwrap();
+
+        assert_ne!(keys_a.tx, keys_b.tx);
+        assert_ne!(keys_a.rx, keys_b.rx);
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic() {
+        let kp = generate_key_pair();
+        let fp1 = fingerprint(&kp.public);
+        let fp2 = fingerprint(&kp.public);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_is_hex_16_chars() {
+        let kp = generate_key_pair();
+        let fp = fingerprint(&kp.public);
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn different_keys_different_fingerprints() {
+        let kp1 = generate_key_pair();
+        let kp2 = generate_key_pair();
+        assert_ne!(fingerprint(&kp1.public), fingerprint(&kp2.public));
+    }
+
+    #[test]
+    fn nonce_from_counter_layout() {
+        // First 4 bytes should be zero, last 8 should be big-endian counter
+        let nonce = nonce_from_counter(0x0102030405060708);
+        assert_eq!(&nonce[..4], &[0, 0, 0, 0]);
+        assert_eq!(&nonce[4..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let key = [42u8; 32];
+        let plaintext = b"test data";
+        let ciphertext = encrypt(&key, 0, plaintext).unwrap();
+        let decrypted = decrypt(&key, 0, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails() {
+        let key = [42u8; 32];
+        let mut ciphertext = encrypt(&key, 0, b"test").unwrap();
+        // Flip a byte
+        if let Some(byte) = ciphertext.last_mut() {
+            *byte ^= 0xff;
+        }
+        assert!(decrypt(&key, 0, &ciphertext).is_err());
+    }
 }

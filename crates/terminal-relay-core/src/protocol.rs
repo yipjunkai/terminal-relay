@@ -1,4 +1,4 @@
-use bincode::config::{Configuration, standard};
+use bincode::config::{standard, Configuration};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
@@ -138,4 +138,205 @@ pub fn decode_secure_message(bytes: &[u8]) -> CoreResult<SecureMessage> {
     bincode::serde::decode_from_slice(bytes, wire_config())
         .map(|(message, _)| message)
         .map_err(|err| CoreError::Deserialization(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── PeerRole ──
+
+    #[test]
+    fn peer_role_opposite() {
+        assert_eq!(PeerRole::Host.opposite(), PeerRole::Client);
+        assert_eq!(PeerRole::Client.opposite(), PeerRole::Host);
+    }
+
+    // ── RelayMessage encode/decode roundtrip ──
+
+    fn relay_roundtrip(msg: &RelayMessage) {
+        let bytes = encode_relay(msg).unwrap();
+        let decoded = decode_relay(&bytes).unwrap();
+        // Compare debug representations as a simple equality check
+        assert_eq!(format!("{msg:?}"), format!("{decoded:?}"));
+    }
+
+    #[test]
+    fn relay_register_roundtrip() {
+        relay_roundtrip(&RelayMessage::Register(RegisterRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_version: "0.1.0".to_string(),
+            session_id: "sess-123".to_string(),
+            pairing_code: "ABC-DEF".to_string(),
+            role: PeerRole::Host,
+            resume_token: None,
+        }));
+    }
+
+    #[test]
+    fn relay_register_with_resume_token() {
+        relay_roundtrip(&RelayMessage::Register(RegisterRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_version: "0.1.0".to_string(),
+            session_id: "sess-123".to_string(),
+            pairing_code: "ABC-DEF".to_string(),
+            role: PeerRole::Client,
+            resume_token: Some("token-xyz".to_string()),
+        }));
+    }
+
+    #[test]
+    fn relay_registered_roundtrip() {
+        relay_roundtrip(&RelayMessage::Registered(RegisterResponse {
+            resume_token: "tok".to_string(),
+            peer_online: true,
+            session_ttl_secs: 3600,
+        }));
+    }
+
+    #[test]
+    fn relay_route_roundtrip() {
+        relay_roundtrip(&RelayMessage::Route(RelayRoute {
+            session_id: "sess".to_string(),
+            payload: vec![1, 2, 3, 4],
+        }));
+    }
+
+    #[test]
+    fn relay_peer_status_roundtrip() {
+        relay_roundtrip(&RelayMessage::PeerStatus(PeerStatus {
+            session_id: "sess".to_string(),
+            role: PeerRole::Host,
+            online: false,
+        }));
+    }
+
+    #[test]
+    fn relay_ping_pong_roundtrip() {
+        relay_roundtrip(&RelayMessage::Ping(42));
+        relay_roundtrip(&RelayMessage::Pong(42));
+    }
+
+    #[test]
+    fn relay_error_roundtrip() {
+        relay_roundtrip(&RelayMessage::Error(RelayError {
+            message: "something went wrong".to_string(),
+        }));
+    }
+
+    // ── PeerFrame encode/decode roundtrip ──
+
+    fn peer_frame_roundtrip(frame: &PeerFrame) {
+        let bytes = encode_peer_frame(frame).unwrap();
+        let decoded = decode_peer_frame(&bytes).unwrap();
+        assert_eq!(format!("{frame:?}"), format!("{decoded:?}"));
+    }
+
+    #[test]
+    fn peer_frame_handshake_roundtrip() {
+        peer_frame_roundtrip(&PeerFrame::Handshake(Handshake {
+            public_key: [7u8; 32],
+            fingerprint: "abc123".to_string(),
+            tool_name: Some("claude".to_string()),
+            timestamp_ms: 1700000000000,
+        }));
+    }
+
+    #[test]
+    fn peer_frame_handshake_no_tool_roundtrip() {
+        peer_frame_roundtrip(&PeerFrame::Handshake(Handshake {
+            public_key: [0u8; 32],
+            fingerprint: "".to_string(),
+            tool_name: None,
+            timestamp_ms: 0,
+        }));
+    }
+
+    #[test]
+    fn peer_frame_secure_roundtrip() {
+        peer_frame_roundtrip(&PeerFrame::Secure(SealedFrame {
+            nonce: 99,
+            ciphertext: vec![0xde, 0xad, 0xbe, 0xef],
+        }));
+    }
+
+    #[test]
+    fn peer_frame_keepalive_roundtrip() {
+        peer_frame_roundtrip(&PeerFrame::KeepAlive);
+    }
+
+    // ── SecureMessage encode/decode roundtrip ──
+
+    fn secure_msg_roundtrip(msg: &SecureMessage) {
+        let bytes = encode_secure_message(msg).unwrap();
+        let decoded = decode_secure_message(&bytes).unwrap();
+        assert_eq!(format!("{msg:?}"), format!("{decoded:?}"));
+    }
+
+    #[test]
+    fn secure_pty_input_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::PtyInput(b"ls -la\n".to_vec()));
+    }
+
+    #[test]
+    fn secure_pty_output_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::PtyOutput(b"total 42\n".to_vec()));
+    }
+
+    #[test]
+    fn secure_resize_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::Resize { cols: 80, rows: 24 });
+    }
+
+    #[test]
+    fn secure_heartbeat_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::Heartbeat);
+    }
+
+    #[test]
+    fn secure_version_notice_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::VersionNotice {
+            minimum_version: "1.0.0".to_string(),
+        });
+    }
+
+    #[test]
+    fn secure_notification_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::Notification(PushNotification {
+            title: "Session ended".to_string(),
+            body: "Your session has been closed.".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_empty_payloads() {
+        secure_msg_roundtrip(&SecureMessage::PtyInput(vec![]));
+        secure_msg_roundtrip(&SecureMessage::PtyOutput(vec![]));
+    }
+
+    #[test]
+    fn secure_large_payload() {
+        let big = vec![0xABu8; 1_000_000];
+        secure_msg_roundtrip(&SecureMessage::PtyOutput(big));
+    }
+
+    // ── Error cases ──
+
+    #[test]
+    fn decode_relay_rejects_garbage() {
+        assert!(decode_relay(&[0xff, 0xff, 0xff]).is_err());
+        assert!(decode_relay(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_peer_frame_rejects_garbage() {
+        assert!(decode_peer_frame(&[0xff, 0xff, 0xff]).is_err());
+        assert!(decode_peer_frame(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_secure_message_rejects_garbage() {
+        assert!(decode_secure_message(&[0xff, 0xff, 0xff]).is_err());
+        assert!(decode_secure_message(&[]).is_err());
+    }
 }
