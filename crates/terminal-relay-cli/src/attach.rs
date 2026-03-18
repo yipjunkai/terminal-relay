@@ -103,6 +103,13 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
         tokio::select! {
             local_input = stdin_rx.recv() => {
                 let Some(bytes) = local_input else { continue; };
+                // Ctrl-C (0x03) detaches the attach client without stopping the host.
+                if bytes == [0x03] {
+                    let mut stdout = tokio::io::stdout();
+                    stdout.write_all(b"\r\n[detached]\r\n").await?;
+                    stdout.flush().await?;
+                    break;
+                }
                 if chan.confirmed
                     && let Some(channel) = chan.channel.as_mut()
                 {
@@ -188,10 +195,29 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Reset terminal state before dropping raw mode:
+    // - Exit alternate screen buffer (in case the tool used it)
+    // - Disable mouse tracking
+    // - Reset all attributes
+    {
+        let mut stdout = tokio::io::stdout();
+        stdout
+            .write_all(
+                b"\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[0m\x1b[2J\x1b[H",
+            )
+            .await?;
+        stdout.flush().await?;
+    }
+
     // Drop raw mode so the terminal behaves normally for the prompt.
     drop(_raw_mode);
 
-    eprintln!("\r\nPress enter to exit...");
+    // Full terminal reset after raw mode is off — this catches anything the
+    // escape sequences above missed (e.g. buffered TUI output that arrived late).
+    print!("\x1b[!p\x1b[?1049l\x1b[2J\x1b[H\x1b[0m");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    eprintln!("Press enter to exit...");
     let mut buf = [0u8; 1];
     let _ = tokio::io::stdin().read(&mut buf).await;
 

@@ -81,7 +81,8 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 
 - [x] Add `--version` flag to the CLI (`#[command(version)]`).
 - [ ] Add `session` subcommand group: `session stop <id>` / `session stop --all` to kill sessions, `session status` for live info (running process, connected peers, uptime), `session cleanup` to remove stale session files.
-- [ ] Add an SSH-style escape sequence (e.g. `~.` to detach, `~~` to send literal `~`) for clean detach and Ctrl-C forwarding.
+- [x] Ctrl-C on attach side detaches cleanly without stopping the host. Terminal state fully reset on detach (alternate screen, mouse tracking, cursor, colors, screen clear).
+- [ ] Add SSH-style escape sequences (`~.` to detach, `~~` to send literal `~`) as an alternative to Ctrl-C.
 - [ ] Show a status indicator on the attach side when the secure channel is not yet established, instead of silently dropping input.
 - [ ] Strengthen session persistence and recovery by restoring active host sessions after CLI restart.
 - [ ] Add clipboard support: allow copy/paste between the remote client and the host PTY via an encrypted `SecureMessage` variant.
