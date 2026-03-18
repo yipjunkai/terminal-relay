@@ -6,7 +6,7 @@ use hkdf::Hkdf;
 use rand::{thread_rng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     error::{CoreError, CoreResult},
@@ -15,23 +15,34 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
+/// X25519 key pair. Not `Clone` — secret material should not be casually duplicated.
+/// Secret bytes are zeroed on drop.
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct KeyPair {
     pub secret: [u8; 32],
     pub public: [u8; 32],
 }
 
-#[derive(Debug, Clone)]
+/// Derived per-session TX/RX symmetric keys. Zeroed on drop.
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct SessionKeys {
     pub tx: [u8; 32],
     pub rx: [u8; 32],
 }
 
+/// Encrypts/decrypts frames using derived session keys. Key material is zeroed on drop.
 pub struct SecureChannel {
     tx_key: [u8; 32],
     rx_key: [u8; 32],
     tx_nonce: u64,
     last_rx_nonce: Option<u64>,
+}
+
+impl Drop for SecureChannel {
+    fn drop(&mut self) {
+        self.tx_key.zeroize();
+        self.rx_key.zeroize();
+    }
 }
 
 impl SecureChannel {
@@ -113,6 +124,51 @@ pub fn derive_session_keys(
 pub fn fingerprint(public_key: &[u8; 32]) -> String {
     let digest = Sha256::digest(public_key);
     hex::encode(&digest[..8])
+}
+
+/// Maximum allowed age for a handshake timestamp (5 minutes).
+pub const HANDSHAKE_MAX_AGE_MS: u64 = 5 * 60 * 1000;
+
+/// Compute an HMAC-SHA256 over the handshake transcript using the derived TX key.
+///
+/// The transcript is: `local_public || remote_public || session_id`.
+/// Each side computes this with their own public key first, so the MACs differ
+/// and each side verifies the other's MAC using the *RX* key.
+pub fn compute_handshake_mac(
+    tx_key: &[u8; 32],
+    local_public: &[u8; 32],
+    remote_public: &[u8; 32],
+    session_id: &str,
+) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(tx_key).expect("HMAC accepts any key size");
+    mac.update(local_public);
+    mac.update(remote_public);
+    mac.update(session_id.as_bytes());
+    let result = mac.finalize();
+    result.into_bytes().into()
+}
+
+/// Verify a received handshake MAC using the RX key.
+///
+/// The remote peer computed the MAC with *their* TX key (which is *our* RX key)
+/// over `remote_public || local_public || session_id`.
+pub fn verify_handshake_mac(
+    rx_key: &[u8; 32],
+    remote_public: &[u8; 32],
+    local_public: &[u8; 32],
+    session_id: &str,
+    received_mac: &[u8; 32],
+) -> CoreResult<()> {
+    use hmac::{Hmac, Mac};
+
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(rx_key).expect("HMAC accepts any key size");
+    mac.update(remote_public);
+    mac.update(local_public);
+    mac.update(session_id.as_bytes());
+    mac.verify_slice(received_mac)
+        .map_err(|_| CoreError::CryptoFailure)
 }
 
 fn encrypt(key: &[u8; 32], counter: u64, plaintext: &[u8]) -> CoreResult<Vec<u8>> {
@@ -399,5 +455,134 @@ mod tests {
             *byte ^= 0xff;
         }
         assert!(decrypt(&key, 0, &ciphertext).is_err());
+    }
+
+    // ── Handshake MAC tests ──
+
+    #[test]
+    fn handshake_mac_verify_roundtrip() {
+        let host_kp = generate_key_pair();
+        let client_kp = generate_key_pair();
+        let session_id = "mac-test";
+
+        let host_keys =
+            derive_session_keys(PeerRole::Host, session_id, host_kp.secret, client_kp.public)
+                .unwrap();
+        let client_keys = derive_session_keys(
+            PeerRole::Client,
+            session_id,
+            client_kp.secret,
+            host_kp.public,
+        )
+        .unwrap();
+
+        // Host computes MAC with its TX key over (host_pub || client_pub || session_id)
+        let host_mac = compute_handshake_mac(
+            &host_keys.tx,
+            &host_kp.public,
+            &client_kp.public,
+            session_id,
+        );
+
+        // Client verifies using its RX key (== host's TX key)
+        // with (host_pub || client_pub || session_id) — note the order matches host's compute
+        verify_handshake_mac(
+            &client_keys.rx,
+            &host_kp.public,
+            &client_kp.public,
+            session_id,
+            &host_mac,
+        )
+        .expect("client should verify host MAC");
+
+        // Client computes MAC with its TX key over (client_pub || host_pub || session_id)
+        let client_mac = compute_handshake_mac(
+            &client_keys.tx,
+            &client_kp.public,
+            &host_kp.public,
+            session_id,
+        );
+
+        // Host verifies using its RX key (== client's TX key)
+        verify_handshake_mac(
+            &host_keys.rx,
+            &client_kp.public,
+            &host_kp.public,
+            session_id,
+            &client_mac,
+        )
+        .expect("host should verify client MAC");
+    }
+
+    #[test]
+    fn handshake_mac_rejects_wrong_mac() {
+        let host_kp = generate_key_pair();
+        let client_kp = generate_key_pair();
+        let session_id = "mac-reject-test";
+
+        let host_keys =
+            derive_session_keys(PeerRole::Host, session_id, host_kp.secret, client_kp.public)
+                .unwrap();
+        let client_keys = derive_session_keys(
+            PeerRole::Client,
+            session_id,
+            client_kp.secret,
+            host_kp.public,
+        )
+        .unwrap();
+
+        let host_mac = compute_handshake_mac(
+            &host_keys.tx,
+            &host_kp.public,
+            &client_kp.public,
+            session_id,
+        );
+
+        // Tamper with the MAC
+        let mut bad_mac = host_mac;
+        bad_mac[0] ^= 0xff;
+
+        assert!(verify_handshake_mac(
+            &client_keys.rx,
+            &host_kp.public,
+            &client_kp.public,
+            session_id,
+            &bad_mac,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn handshake_mac_host_and_client_differ() {
+        let host_kp = generate_key_pair();
+        let client_kp = generate_key_pair();
+        let session_id = "mac-differ-test";
+
+        let host_keys =
+            derive_session_keys(PeerRole::Host, session_id, host_kp.secret, client_kp.public)
+                .unwrap();
+        let client_keys = derive_session_keys(
+            PeerRole::Client,
+            session_id,
+            client_kp.secret,
+            host_kp.public,
+        )
+        .unwrap();
+
+        let host_mac = compute_handshake_mac(
+            &host_keys.tx,
+            &host_kp.public,
+            &client_kp.public,
+            session_id,
+        );
+        let client_mac = compute_handshake_mac(
+            &client_keys.tx,
+            &client_kp.public,
+            &host_kp.public,
+            session_id,
+        );
+
+        // The two MACs must differ (different keys, different transcript order)
+        assert_ne!(host_mac, client_mac);
     }
 }

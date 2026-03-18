@@ -2,17 +2,18 @@
 
 Items are roughly ordered by priority within each phase.
 
-## Phase 1: Security hardening (current)
+## Phase 1: Security hardening (complete)
 
-- [ ] Derive `ZeroizeOnDrop` on `KeyPair`, `SessionKeys`, and `SecureChannel` so secret material is cleared from memory on drop. Remove `Clone` from `KeyPair`.
-- [ ] Encrypt session state files at rest and restrict file permissions (`chmod 0600` on session JSON, `0700` on `~/.terminal-relay/`). Secret keys are currently stored in plaintext.
-- [ ] Add a key confirmation step after the DH handshake (e.g. MAC over transcript) to prove each peer holds the private key. Validate `timestamp_ms` to reject stale/replayed handshakes.
-- [ ] Validate `Route.session_id` matches the sender's registered session before forwarding, preventing cross-session message injection.
-- [ ] Validate `session_id` (UUID v4 format) and `pairing_code` format on the server. Enforce max lengths on all `RegisterRequest` string fields.
-- [ ] Rate-limit failed pairing-code attempts per session on the relay. Lock out after N failures and log with source IP.
+- [x] Derive `ZeroizeOnDrop` on `KeyPair`, `SessionKeys`, and `SecureChannel` so secret material is cleared from memory on drop. Remove `Clone` from `KeyPair`.
+- [x] Encrypt session state files at rest and restrict file permissions (`chmod 0600` on session JSON, `0700` on `~/.terminal-relay/`). AES-256-GCM with machine-local state key, legacy plaintext fallback for migration.
+- [x] Add `HandshakeConfirm` peer frame with HMAC-SHA256 key confirmation after DH handshake. Validate `timestamp_ms` to reject stale handshakes (5-minute window). Channel not trusted until confirmation succeeds.
+- [x] Validate `Route.session_id` matches the sender's registered session before forwarding, preventing cross-session message injection.
+- [x] Validate `session_id` (UUID v4 format) and `pairing_code` format on the server. Enforce max lengths on all `RegisterRequest` string fields.
+- [x] Rate-limit failed pairing-code attempts per session on the relay. Lock out after 5 failures with per-session counter and warning logs.
 
-## Phase 2: Relay reliability & deployment
+## Phase 2: Relay reliability & deployment (current)
 
+- [ ] Add server versioning: include `server_version` (from `CARGO_PKG_VERSION`) in `RegisterResponse` and in the `/health` endpoint JSON response.
 - [ ] Add graceful shutdown to the relay server (`tokio::signal` + `with_graceful_shutdown`). Send WebSocket close frames and cancel the cleanup loop.
 - [ ] Handle SIGTERM (not just SIGINT) on the host for clean shutdown in containers.
 - [ ] Wrap `connect_async` and initial registration exchange in `tokio::time::timeout()` to prevent hangs on unresponsive servers.
@@ -88,8 +89,9 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 
 ## Code quality
 
-- [x] Add unit tests for `crypto.rs` (seal/open roundtrip, replay rejection, nonce exhaustion, key derivation symmetry, fingerprint determinism), `pairing.rs` (URI roundtrip, malformed input, code format), and `protocol.rs` (encode/decode all variants, garbage rejection). 51 tests total.
-- [ ] Add unit tests for `relay.rs` (registration, cleanup, version validation) and `state.rs` (save/load roundtrip).
+- [x] Add unit tests for `crypto.rs` (seal/open roundtrip, replay rejection, nonce exhaustion, key derivation symmetry, fingerprint determinism), `pairing.rs` (URI roundtrip, malformed input, code format), and `protocol.rs` (encode/decode all variants, garbage rejection). 51 tests.
+- [x] Add unit tests for `state.rs` (save/load roundtrip, encryption verification, legacy plaintext migration, file permissions, key persistence, corruption handling). 7 tests.
+- [ ] Add unit tests for `relay.rs` (registration, cleanup, version validation).
 - [ ] Add integration tests for relay registration, encrypted handshake, reconnect/resume, and replay protection.
 - [ ] Extract duplicated functions (`now_millis`, `send_handshake`, `send_peer_frame`) from `host.rs` and `attach.rs` into a shared module.
 - [ ] Remove or wire up `#[allow(dead_code)]` items in `state.rs` (`load()`, `ensure_path_exists()`).

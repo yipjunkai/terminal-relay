@@ -12,11 +12,14 @@ use tokio::{task::JoinHandle, time::sleep};
 use tracing::{info, warn};
 
 use terminal_relay_core::{
-    crypto::{SecureChannel, derive_session_keys, fingerprint, generate_key_pair},
+    crypto::{
+        SecureChannel, compute_handshake_mac, derive_session_keys, fingerprint, generate_key_pair,
+        HANDSHAKE_MAX_AGE_MS,
+    },
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
     protocol::{
-        Handshake, PROTOCOL_VERSION, PeerFrame, PeerRole, RegisterRequest, RelayMessage,
-        RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
+        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PeerFrame, PeerRole, RegisterRequest,
+        RelayMessage, RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
     },
 };
 
@@ -132,6 +135,8 @@ async fn run_single_host_session(
     let mut output_rx = streams.output_rx;
     let mut exit_rx = streams.exit_rx;
     let mut secure_channel: Option<SecureChannel> = None;
+    let mut channel_confirmed = false;
+    let mut expected_peer_mac: Option<[u8; 32]> = None;
     let mut output_backlog: VecDeque<Vec<u8>> = VecDeque::new();
     let mut peer_online = registered.peer_online;
 
@@ -150,11 +155,13 @@ async fn run_single_host_session(
         tokio::select! {
             output = output_rx.recv() => {
                 let Some(bytes) = output else { continue; };
-                if let Some(channel) = secure_channel.as_mut() {
-                    let sealed = channel.seal(&SecureMessage::PtyOutput(bytes.clone()))?;
-                    let frame = PeerFrame::Secure(sealed);
-                    if let Err(err) = send_peer_frame(&relay_tx, &session_id, frame) {
-                        warn!(error = %err, "failed sending PTY output");
+                if channel_confirmed {
+                    if let Some(channel) = secure_channel.as_mut() {
+                        let sealed = channel.seal(&SecureMessage::PtyOutput(bytes.clone()))?;
+                        let frame = PeerFrame::Secure(sealed);
+                        if let Err(err) = send_peer_frame(&relay_tx, &session_id, frame) {
+                            warn!(error = %err, "failed sending PTY output");
+                        }
                     }
                 } else {
                     queue_backlog(&mut output_backlog, bytes);
@@ -171,7 +178,10 @@ async fn run_single_host_session(
                             &session_id,
                             &tool_name,
                             local_key.secret,
+                            &local_key.public,
                             &mut secure_channel,
+                            &mut channel_confirmed,
+                            &mut expected_peer_mac,
                             &mut pty,
                             &mut output_backlog,
                             &relay_tx,
@@ -190,6 +200,8 @@ async fn run_single_host_session(
                                 )?;
                             } else {
                                 secure_channel = None;
+                                channel_confirmed = false;
+                                expected_peer_mac = None;
                             }
                         }
                     }
@@ -204,6 +216,8 @@ async fn run_single_host_session(
                         relay_tx = relay.sender();
                         resume_token = new_registered.resume_token.clone();
                         secure_channel = None;
+                        channel_confirmed = false;
+                        expected_peer_mac = None;
                         peer_online = new_registered.peer_online;
                         if peer_online {
                             send_handshake(
@@ -240,7 +254,10 @@ fn handle_route(
     session_id: &str,
     tool_name: &str,
     local_secret: [u8; 32],
+    local_public: &[u8; 32],
     secure_channel: &mut Option<SecureChannel>,
+    channel_confirmed: &mut bool,
+    expected_peer_mac: &mut Option<[u8; 32]>,
     pty: &mut PtySession,
     output_backlog: &mut VecDeque<Vec<u8>>,
     relay_tx: &mpsc::UnboundedSender<RelayMessage>,
@@ -248,6 +265,18 @@ fn handle_route(
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
         PeerFrame::Handshake(handshake) => {
+            // Validate handshake timestamp to reject stale/replayed messages.
+            let now = now_millis();
+            let age = now.saturating_sub(handshake.timestamp_ms);
+            if age > HANDSHAKE_MAX_AGE_MS {
+                warn!(
+                    session_id = %session_id,
+                    age_ms = age,
+                    "rejecting stale handshake"
+                );
+                return Ok(());
+            }
+
             info!(
                 session_id = %session_id,
                 peer_fingerprint = %handshake.fingerprint,
@@ -260,11 +289,41 @@ fn handle_route(
                 local_secret,
                 handshake.public_key,
             )?;
-            *secure_channel = Some(SecureChannel::new(keys));
 
+            // Compute our outbound confirmation MAC and the expected peer MAC.
+            let our_mac = compute_handshake_mac(&keys.tx, local_public, &handshake.public_key, session_id);
+            let peer_mac = compute_handshake_mac(&keys.rx, &handshake.public_key, local_public, session_id);
+
+            *secure_channel = Some(SecureChannel::new(keys));
+            *channel_confirmed = false;
+            *expected_peer_mac = Some(peer_mac);
+
+            send_peer_frame(relay_tx, session_id, PeerFrame::HandshakeConfirm(HandshakeConfirm { mac: our_mac }))?;
+        }
+        PeerFrame::HandshakeConfirm(confirm) => {
+            let Some(expected) = expected_peer_mac else {
+                warn!(session_id = %session_id, "received HandshakeConfirm without pending handshake");
+                return Ok(());
+            };
+
+            // Constant-time comparison: the expected MAC was pre-computed using
+            // the peer's TX key (our RX key) over (peer_public || local_public || session_id).
+            if confirm.mac != *expected {
+                warn!(session_id = %session_id, "handshake confirmation MAC mismatch — tearing down channel");
+                *secure_channel = None;
+                *channel_confirmed = false;
+                *expected_peer_mac = None;
+                return Ok(());
+            }
+
+            info!(session_id = %session_id, "handshake confirmed, channel trusted");
+            *channel_confirmed = true;
+            *expected_peer_mac = None;
+
+            // Drain backlog now that channel is confirmed.
             while let Some(bytes) = output_backlog.pop_front() {
-                if let Some(channel) = secure_channel.as_mut() {
-                    let sealed = channel.seal(&SecureMessage::PtyOutput(bytes))?;
+                if let Some(ch) = secure_channel.as_mut() {
+                    let sealed = ch.seal(&SecureMessage::PtyOutput(bytes))?;
                     send_peer_frame(relay_tx, session_id, PeerFrame::Secure(sealed))?;
                 }
             }
@@ -274,12 +333,15 @@ fn handle_route(
                     title: format!("Connected to {tool_name}"),
                     body: "Session encryption established".to_string(),
                 });
-            if let Some(channel) = secure_channel.as_mut() {
-                let sealed = channel.seal(&notice)?;
+            if let Some(ch) = secure_channel.as_mut() {
+                let sealed = ch.seal(&notice)?;
                 send_peer_frame(relay_tx, session_id, PeerFrame::Secure(sealed))?;
             }
         }
         PeerFrame::Secure(sealed) => {
+            if !*channel_confirmed {
+                return Ok(());
+            }
             let Some(channel) = secure_channel.as_mut() else {
                 return Ok(());
             };

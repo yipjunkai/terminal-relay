@@ -36,12 +36,16 @@ impl PeerSlot {
     }
 }
 
+/// Maximum failed pairing-code attempts before a session is locked out.
+const MAX_PAIRING_FAILURES: u32 = 5;
+
 #[derive(Clone)]
 struct SessionSlot {
     pairing_code: String,
     host: PeerSlot,
     client: PeerSlot,
     last_activity: Instant,
+    failed_pairing_attempts: u32,
 }
 
 impl SessionSlot {
@@ -51,6 +55,7 @@ impl SessionSlot {
             host: PeerSlot::new(),
             client: PeerSlot::new(),
             last_activity: Instant::now(),
+            failed_pairing_attempts: 0,
         }
     }
 
@@ -117,6 +122,8 @@ impl RelayState {
         request: &RegisterRequest,
         sender: mpsc::UnboundedSender<RelayMessage>,
     ) -> Result<RegisterResponse, String> {
+        validate_register_request(request)?;
+
         if request.protocol_version != PROTOCOL_VERSION {
             return Err(format!(
                 "unsupported protocol version {}, expected {}",
@@ -131,7 +138,18 @@ impl RelayState {
                 .entry(request.session_id.clone())
                 .or_insert_with(|| SessionSlot::new(request.pairing_code.clone()));
 
+            if session.failed_pairing_attempts >= MAX_PAIRING_FAILURES {
+                warn!(session_id = %request.session_id, "session locked out after too many failed pairing attempts");
+                return Err("session locked: too many failed pairing attempts".into());
+            }
+
             if session.pairing_code != request.pairing_code {
+                session.failed_pairing_attempts += 1;
+                warn!(
+                    session_id = %request.session_id,
+                    attempts = session.failed_pairing_attempts,
+                    "invalid pairing code"
+                );
                 return Err("invalid pairing code".into());
             }
 
@@ -171,7 +189,18 @@ impl RelayState {
             .get_mut(&request.session_id)
             .ok_or_else(|| "unknown session id".to_string())?;
 
+        if session.failed_pairing_attempts >= MAX_PAIRING_FAILURES {
+            warn!(session_id = %request.session_id, "session locked out after too many failed pairing attempts");
+            return Err("session locked: too many failed pairing attempts".into());
+        }
+
         if session.pairing_code != request.pairing_code {
+            session.failed_pairing_attempts += 1;
+            warn!(
+                session_id = %request.session_id,
+                attempts = session.failed_pairing_attempts,
+                "invalid pairing code"
+            );
             return Err("invalid pairing code".into());
         }
 
@@ -262,6 +291,56 @@ impl RelayState {
     }
 }
 
+/// Maximum allowed length for string fields in `RegisterRequest`.
+const MAX_SESSION_ID_LEN: usize = 64;
+const MAX_PAIRING_CODE_LEN: usize = 32;
+const MAX_CLIENT_VERSION_LEN: usize = 32;
+const MAX_RESUME_TOKEN_LEN: usize = 64;
+
+/// Validate format and length constraints on `RegisterRequest` fields.
+fn validate_register_request(request: &RegisterRequest) -> Result<(), String> {
+    // session_id: must be valid UUID v4 format (36 chars: 8-4-4-4-12 hex)
+    if request.session_id.len() > MAX_SESSION_ID_LEN {
+        return Err("session_id exceeds maximum length".into());
+    }
+    if uuid::Uuid::parse_str(&request.session_id).is_err() {
+        return Err("session_id is not a valid UUID".into());
+    }
+
+    // pairing_code: expected format XXXXXX-XXXXXX-XXXXXX (20 chars, uppercase alphanumeric + dashes)
+    if request.pairing_code.len() > MAX_PAIRING_CODE_LEN {
+        return Err("pairing_code exceeds maximum length".into());
+    }
+    if !is_valid_pairing_code(&request.pairing_code) {
+        return Err("pairing_code has invalid format".into());
+    }
+
+    // client_version
+    if request.client_version.len() > MAX_CLIENT_VERSION_LEN {
+        return Err("client_version exceeds maximum length".into());
+    }
+
+    // resume_token (optional)
+    if let Some(token) = &request.resume_token {
+        if token.len() > MAX_RESUME_TOKEN_LEN {
+            return Err("resume_token exceeds maximum length".into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Check that a pairing code matches the expected `XXXXXX-XXXXXX-XXXXXX` format.
+fn is_valid_pairing_code(code: &str) -> bool {
+    let parts: Vec<&str> = code.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        part.len() == 6 && part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    })
+}
+
 pub async fn health_handler() -> Json<&'static str> {
     Json("ok")
 }
@@ -344,7 +423,13 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelaySta
                     Ok(Message::Binary(bytes)) => {
                         match decode_relay(&bytes) {
                             Ok(RelayMessage::Route(route)) => {
-                                if let Err(message) = state.route(register_request.role, route) {
+                                // Validate the Route targets the sender's own session,
+                                // preventing cross-session message injection.
+                                if route.session_id != register_request.session_id {
+                                    let _ = tx.send(RelayMessage::Error(RelayError {
+                                        message: "route session_id does not match registered session".into(),
+                                    }));
+                                } else if let Err(message) = state.route(register_request.role, route) {
                                     let _ = tx.send(RelayMessage::Error(RelayError { message }));
                                 }
                             }

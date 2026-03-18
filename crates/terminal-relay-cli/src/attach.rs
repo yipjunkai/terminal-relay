@@ -9,11 +9,14 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use terminal_relay_core::{
-    crypto::{SecureChannel, derive_session_keys, fingerprint, generate_key_pair},
+    crypto::{
+        SecureChannel, compute_handshake_mac, derive_session_keys, fingerprint, generate_key_pair,
+        HANDSHAKE_MAX_AGE_MS,
+    },
     pairing::{PairingUri, parse_pairing_uri},
     protocol::{
-        Handshake, PROTOCOL_VERSION, PeerFrame, PeerRole, RegisterRequest, RelayMessage,
-        RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
+        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PeerFrame, PeerRole, RegisterRequest,
+        RelayMessage, RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
     },
 };
 
@@ -43,6 +46,8 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
     let mut relay_tx = relay.sender();
     let mut resume_token = registered.resume_token.clone();
     let mut secure_channel: Option<SecureChannel> = None;
+    let mut channel_confirmed = false;
+    let mut expected_peer_mac: Option<[u8; 32]> = None;
 
     println!("Connected to session {}", pairing.session_id);
     println!("Local fingerprint: {}", local_fingerprint);
@@ -96,11 +101,13 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
         tokio::select! {
             local_input = stdin_rx.recv() => {
                 let Some(bytes) = local_input else { continue; };
+                if channel_confirmed {
                     if let Some(channel) = secure_channel.as_mut() {
                         let sealed = channel.seal(&SecureMessage::PtyInput(bytes))?;
                         send_peer_frame(&relay_tx, &pairing.session_id, PeerFrame::Secure(sealed))?;
                     }
                 }
+            }
             inbound = relay.recv() => {
                 match inbound {
                     Some(RelayMessage::Route(route)) => {
@@ -109,9 +116,13 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                         }
                         handle_route(
                             route,
-                                &pairing,
-                                local_key.secret,
-                                &mut secure_channel,
+                            &pairing,
+                            local_key.secret,
+                            &local_key.public,
+                            &mut secure_channel,
+                            &mut channel_confirmed,
+                            &mut expected_peer_mac,
+                            &relay_tx,
                             &mut stdout,
                         ).await?;
                     }
@@ -124,7 +135,7 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                                 &local_fingerprint,
                                 Some("remote-terminal".to_string()),
                             )?;
-                            send_resize(&relay_tx, &pairing.session_id, &mut secure_channel)?;
+                            send_resize(&relay_tx, &pairing.session_id, &mut secure_channel, channel_confirmed)?;
                         }
                     }
                     Some(RelayMessage::Error(err)) => {
@@ -138,6 +149,8 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                         relay_tx = relay.sender();
                         resume_token = new_registered.resume_token.clone();
                         secure_channel = None;
+                        channel_confirmed = false;
+                        expected_peer_mac = None;
                         if new_registered.peer_online {
                             send_handshake(
                                 &pairing.session_id,
@@ -152,13 +165,13 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
             }
             _ = heartbeat.tick() => {
                 let _ = relay_tx.send(RelayMessage::Ping(now_millis()));
-                send_resize(&relay_tx, &pairing.session_id, &mut secure_channel)?;
+                send_resize(&relay_tx, &pairing.session_id, &mut secure_channel, channel_confirmed)?;
             }
             resize_event = resize_rx.recv() => {
                 if resize_event.is_none() {
                     continue;
                 }
-                send_resize(&relay_tx, &pairing.session_id, &mut secure_channel)?;
+                send_resize(&relay_tx, &pairing.session_id, &mut secure_channel, channel_confirmed)?;
             }
             _ = tokio::signal::ctrl_c() => {
                 break;
@@ -173,12 +186,24 @@ async fn handle_route(
     route: RelayRoute,
     pairing: &PairingUri,
     local_secret: [u8; 32],
+    local_public: &[u8; 32],
     secure_channel: &mut Option<SecureChannel>,
+    channel_confirmed: &mut bool,
+    expected_peer_mac: &mut Option<[u8; 32]>,
+    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
     stdout: &mut tokio::io::Stdout,
 ) -> anyhow::Result<()> {
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
         PeerFrame::Handshake(handshake) => {
+            // Validate handshake timestamp to reject stale/replayed messages.
+            let now = now_millis();
+            let age = now.saturating_sub(handshake.timestamp_ms);
+            if age > HANDSHAKE_MAX_AGE_MS {
+                warn!(age_ms = age, "rejecting stale handshake");
+                return Ok(());
+            }
+
             if let Some(expected) = &pairing.expected_fingerprint {
                 if &handshake.fingerprint != expected {
                     return Err(anyhow::anyhow!(
@@ -188,16 +213,47 @@ async fn handle_route(
                     ));
                 }
             }
+
             let keys = derive_session_keys(
                 PeerRole::Client,
                 &pairing.session_id,
                 local_secret,
                 handshake.public_key,
             )?;
+
+            // Compute our outbound confirmation MAC and the expected peer MAC.
+            let our_mac = compute_handshake_mac(&keys.tx, local_public, &handshake.public_key, &pairing.session_id);
+            let peer_mac = compute_handshake_mac(&keys.rx, &handshake.public_key, local_public, &pairing.session_id);
+
             *secure_channel = Some(SecureChannel::new(keys));
-            info!(peer_fingerprint = %handshake.fingerprint, "secure channel established");
+            *channel_confirmed = false;
+            *expected_peer_mac = Some(peer_mac);
+
+            send_peer_frame(relay_tx, &pairing.session_id, PeerFrame::HandshakeConfirm(HandshakeConfirm { mac: our_mac }))?;
+            info!(peer_fingerprint = %handshake.fingerprint, "handshake received, awaiting confirmation");
+        }
+        PeerFrame::HandshakeConfirm(confirm) => {
+            let Some(expected) = expected_peer_mac else {
+                warn!("received HandshakeConfirm without pending handshake");
+                return Ok(());
+            };
+
+            if confirm.mac != *expected {
+                warn!("handshake confirmation MAC mismatch — tearing down channel");
+                *secure_channel = None;
+                *channel_confirmed = false;
+                *expected_peer_mac = None;
+                return Ok(());
+            }
+
+            info!("handshake confirmed, channel trusted");
+            *channel_confirmed = true;
+            *expected_peer_mac = None;
         }
         PeerFrame::Secure(sealed) => {
+            if !*channel_confirmed {
+                return Ok(());
+            }
             let Some(channel) = secure_channel.as_mut() else {
                 return Ok(());
             };
@@ -240,7 +296,11 @@ fn send_resize(
     relay_tx: &mpsc::UnboundedSender<RelayMessage>,
     session_id: &str,
     secure_channel: &mut Option<SecureChannel>,
+    confirmed: bool,
 ) -> anyhow::Result<()> {
+    if !confirmed {
+        return Ok(());
+    }
     let Some(channel) = secure_channel.as_mut() else {
         return Ok(());
     };
