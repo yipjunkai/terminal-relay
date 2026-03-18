@@ -158,7 +158,7 @@ The relay URL defaults to production. Override with `TERMINAL_RELAY_URL` env var
 
 ### Protocol
 
-All WebSocket messages are bincode-encoded across three layers:
+All WebSocket messages are MessagePack-encoded across three layers:
 
 **Relay-level** (`RelayMessage`): Register, Registered, Route, PeerStatus, Ping/Pong, Error
 
