@@ -4,8 +4,8 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm,
+    aead::{Aead, KeyInit},
 };
 use anyhow::Context;
 use rand::RngCore;
@@ -170,7 +170,7 @@ fn load_or_create_state_key(root: &Path) -> anyhow::Result<[u8; 32]> {
     } else {
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
-        fs::write(&key_path, &key).context("failed writing state key")?;
+        fs::write(&key_path, key).context("failed writing state key")?;
         set_file_permissions(&key_path)?;
         Ok(key)
     }

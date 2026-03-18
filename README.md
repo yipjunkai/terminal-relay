@@ -64,20 +64,6 @@ terminal-relay sessions           # List active/persisted sessions
 
 Native iOS (Swift) and Android (Kotlin) apps are planned as the primary mobile clients, with speech-to-code support for hands-free interaction with your AI tools.
 
-## Roadmap
-
-1. **Security hardening** — ZeroizeOnDrop on key material, encrypted state files at rest, server-side input validation
-2. **Relay reliability & deployment** — graceful shutdown, connection timeouts, production deploy
-3. **Protocol extensions** — add `SessionEnded`, `Clipboard`, `VoiceCommand` wire types before native apps ship
-4. **Native mobile apps** — iOS (Swift) and Android (Kotlin) with terminal rendering, E2E encryption, and speech-to-code
-5. **Web client** — xterm.js fallback for desktop attach and browsers without the native app
-
-See [TODO.md](TODO.md) for the full breakdown.
-
-## Current status
-
-Working foundation with PTY relay, reconnect, QR pairing, E2E encryption, session persistence, and 58 unit tests covering crypto, protocol, pairing, and state encryption.
-
 ## Security
 
 Terminal Relay is designed so that **no one except you and your connected device can read your terminal data** — not us, not the relay operator, not anyone on the network.

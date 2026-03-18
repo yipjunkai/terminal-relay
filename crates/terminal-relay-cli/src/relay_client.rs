@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -8,6 +10,9 @@ use terminal_relay_core::protocol::{
     RegisterRequest, RegisterResponse, RelayMessage, decode_relay, encode_relay,
 };
 
+/// Timeout for the initial WebSocket connect + registration exchange.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct RelayConnection {
     sender: mpsc::UnboundedSender<RelayMessage>,
     receiver: mpsc::UnboundedReceiver<RelayMessage>,
@@ -15,6 +20,17 @@ pub struct RelayConnection {
 
 impl RelayConnection {
     pub async fn connect(
+        url: &str,
+        register: RegisterRequest,
+    ) -> anyhow::Result<(Self, RegisterResponse)> {
+        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(url, register))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("connection to relay timed out after {CONNECT_TIMEOUT:?}")
+            })?
+    }
+
+    async fn connect_inner(
         url: &str,
         register: RegisterRequest,
     ) -> anyhow::Result<(Self, RegisterResponse)> {

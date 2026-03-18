@@ -1,9 +1,9 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm,
+    aead::{Aead, KeyInit},
 };
 use hkdf::Hkdf;
-use rand::{thread_rng, RngCore};
+use rand::{RngCore, thread_rng};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -11,7 +11,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::{
     error::{CoreError, CoreResult},
     protocol::{
-        decode_secure_message, encode_secure_message, PeerRole, SealedFrame, SecureMessage,
+        PeerRole, SealedFrame, SecureMessage, decode_secure_message, encode_secure_message,
     },
 };
 
@@ -67,10 +67,10 @@ impl SecureChannel {
     }
 
     pub fn open(&mut self, frame: &SealedFrame) -> CoreResult<SecureMessage> {
-        if let Some(last_seen) = self.last_rx_nonce {
-            if frame.nonce <= last_seen {
-                return Err(CoreError::ReplayDetected);
-            }
+        if let Some(last_seen) = self.last_rx_nonce
+            && frame.nonce <= last_seen
+        {
+            return Err(CoreError::ReplayDetected);
         }
         let plaintext = decrypt(&self.rx_key, frame.nonce, &frame.ciphertext)?;
         self.last_rx_nonce = Some(frame.nonce);
@@ -542,14 +542,16 @@ mod tests {
         let mut bad_mac = host_mac;
         bad_mac[0] ^= 0xff;
 
-        assert!(verify_handshake_mac(
-            &client_keys.rx,
-            &host_kp.public,
-            &client_kp.public,
-            session_id,
-            &bad_mac,
-        )
-        .is_err());
+        assert!(
+            verify_handshake_mac(
+                &client_keys.rx,
+                &host_kp.public,
+                &client_kp.public,
+                session_id,
+                &bad_mac,
+            )
+            .is_err()
+        );
     }
 
     #[test]

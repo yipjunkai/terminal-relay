@@ -13,8 +13,8 @@ use tracing::{info, warn};
 
 use terminal_relay_core::{
     crypto::{
-        SecureChannel, compute_handshake_mac, derive_session_keys, fingerprint, generate_key_pair,
-        HANDSHAKE_MAX_AGE_MS,
+        HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys,
+        fingerprint, generate_key_pair,
     },
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
     protocol::{
@@ -22,6 +22,37 @@ use terminal_relay_core::{
         RelayMessage, RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
     },
 };
+
+/// Identity and key material for the local side of a session (immutable after creation).
+struct SessionIdentity {
+    session_id: String,
+    tool_name: String,
+    local_secret: [u8; 32],
+    local_public: [u8; 32],
+}
+
+/// Mutable state for the encrypted channel during a session.
+struct ChannelState {
+    channel: Option<SecureChannel>,
+    confirmed: bool,
+    expected_peer_mac: Option<[u8; 32]>,
+}
+
+impl ChannelState {
+    fn new() -> Self {
+        Self {
+            channel: None,
+            confirmed: false,
+            expected_peer_mac: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.channel = None;
+        self.confirmed = false;
+        self.expected_peer_mac = None;
+    }
+}
 
 use crate::{
     ai_tools::{ToolSelector, resolve_tool},
@@ -62,16 +93,16 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
         let session_store = store.clone();
 
         tasks.push(tokio::spawn(async move {
-            run_single_host_session(
-                tool.name,
-                tool.command,
-                tool.args,
+            run_single_host_session(HostSessionParams {
+                tool_name: tool.name,
+                command: tool.command,
+                args: tool.args,
                 relay_url,
                 rows,
                 cols,
                 no_qr,
-                session_store,
-            )
+                store: session_store,
+            })
             .await
         }));
     }
@@ -82,7 +113,7 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
     Ok(())
 }
 
-async fn run_single_host_session(
+struct HostSessionParams {
     tool_name: String,
     command: String,
     args: Vec<String>,
@@ -91,7 +122,20 @@ async fn run_single_host_session(
     cols: u16,
     no_qr: bool,
     store: SessionStore,
-) -> anyhow::Result<()> {
+}
+
+async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()> {
+    let HostSessionParams {
+        tool_name,
+        command,
+        args,
+        relay_url,
+        rows,
+        cols,
+        no_qr,
+        store,
+    } = params;
+
     let session_id = new_session_id();
     let pairing_code = new_pairing_code();
     let local_key = generate_key_pair();
@@ -131,35 +175,43 @@ async fn run_single_host_session(
         print_qr(&pairing_uri)?;
     }
 
+    let identity = SessionIdentity {
+        session_id,
+        tool_name,
+        local_secret: local_key.secret,
+        local_public: local_key.public,
+    };
+
     let (mut pty, streams) = PtySession::spawn(&command, &args, rows, cols)?;
     let mut output_rx = streams.output_rx;
     let mut exit_rx = streams.exit_rx;
-    let mut secure_channel: Option<SecureChannel> = None;
-    let mut channel_confirmed = false;
-    let mut expected_peer_mac: Option<[u8; 32]> = None;
+    let mut chan = ChannelState::new();
     let mut output_backlog: VecDeque<Vec<u8>> = VecDeque::new();
     let mut peer_online = registered.peer_online;
 
     if peer_online {
         send_handshake(
-            &session_id,
+            &identity.session_id,
             &relay_tx,
-            &local_key.public,
+            &identity.local_public,
             &local_fingerprint,
-            Some(tool_name.clone()),
+            Some(identity.tool_name.clone()),
         )?;
     }
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
             output = output_rx.recv() => {
                 let Some(bytes) = output else { continue; };
-                if channel_confirmed {
-                    if let Some(channel) = secure_channel.as_mut() {
+                if chan.confirmed {
+                    if let Some(channel) = chan.channel.as_mut() {
                         let sealed = channel.seal(&SecureMessage::PtyOutput(bytes.clone()))?;
                         let frame = PeerFrame::Secure(sealed);
-                        if let Err(err) = send_peer_frame(&relay_tx, &session_id, frame) {
+                        if let Err(err) = send_peer_frame(&relay_tx, &identity.session_id, frame) {
                             warn!(error = %err, "failed sending PTY output");
                         }
                     }
@@ -170,18 +222,13 @@ async fn run_single_host_session(
             inbound = relay.recv() => {
                 match inbound {
                     Some(RelayMessage::Route(route)) => {
-                        if route.session_id != session_id {
+                        if route.session_id != identity.session_id {
                             continue;
                         }
                         handle_route(
                             route,
-                            &session_id,
-                            &tool_name,
-                            local_key.secret,
-                            &local_key.public,
-                            &mut secure_channel,
-                            &mut channel_confirmed,
-                            &mut expected_peer_mac,
+                            &identity,
+                            &mut chan,
                             &mut pty,
                             &mut output_backlog,
                             &relay_tx,
@@ -192,40 +239,36 @@ async fn run_single_host_session(
                             peer_online = status.online;
                             if peer_online {
                                 send_handshake(
-                                    &session_id,
+                                    &identity.session_id,
                                     &relay_tx,
-                                    &local_key.public,
+                                    &identity.local_public,
                                     &local_fingerprint,
-                                    Some(tool_name.clone()),
+                                    Some(identity.tool_name.clone()),
                                 )?;
                             } else {
-                                secure_channel = None;
-                                channel_confirmed = false;
-                                expected_peer_mac = None;
+                                chan.reset();
                             }
                         }
                     }
                     Some(RelayMessage::Error(err)) => {
-                        warn!(session_id = %session_id, message = %err.message, "relay reported error");
+                        warn!(session_id = %identity.session_id, message = %err.message, "relay reported error");
                     }
                     Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
                     None => {
-                        warn!(session_id = %session_id, "relay disconnected, attempting recovery");
-                        let (new_relay, new_registered) = reconnect_host(&relay_url, &session_id, &pairing_code, &resume_token).await?;
+                        warn!(session_id = %identity.session_id, "relay disconnected, attempting recovery");
+                        let (new_relay, new_registered) = reconnect_host(&relay_url, &identity.session_id, &pairing_code, &resume_token).await?;
                         relay = new_relay;
                         relay_tx = relay.sender();
                         resume_token = new_registered.resume_token.clone();
-                        secure_channel = None;
-                        channel_confirmed = false;
-                        expected_peer_mac = None;
+                        chan.reset();
                         peer_online = new_registered.peer_online;
                         if peer_online {
                             send_handshake(
-                                &session_id,
+                                &identity.session_id,
                                 &relay_tx,
-                                &local_key.public,
+                                &identity.local_public,
                                 &local_fingerprint,
-                                Some(tool_name.clone()),
+                                Some(identity.tool_name.clone()),
                             )?;
                         }
                     }
@@ -236,11 +279,11 @@ async fn run_single_host_session(
             }
             exit_code = &mut exit_rx => {
                 let code = exit_code.unwrap_or(1);
-                info!(session_id = %session_id, code = code, "PTY process exited");
+                info!(session_id = %identity.session_id, code = code, "PTY process exited");
                 break;
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!(session_id = %session_id, "received ctrl-c, stopping host session");
+            _ = &mut shutdown => {
+                info!(session_id = %identity.session_id, "received shutdown signal, stopping host session");
                 break;
             }
         }
@@ -251,13 +294,8 @@ async fn run_single_host_session(
 
 fn handle_route(
     route: RelayRoute,
-    session_id: &str,
-    tool_name: &str,
-    local_secret: [u8; 32],
-    local_public: &[u8; 32],
-    secure_channel: &mut Option<SecureChannel>,
-    channel_confirmed: &mut bool,
-    expected_peer_mac: &mut Option<[u8; 32]>,
+    id: &SessionIdentity,
+    chan: &mut ChannelState,
     pty: &mut PtySession,
     output_backlog: &mut VecDeque<Vec<u8>>,
     relay_tx: &mpsc::UnboundedSender<RelayMessage>,
@@ -270,7 +308,7 @@ fn handle_route(
             let age = now.saturating_sub(handshake.timestamp_ms);
             if age > HANDSHAKE_MAX_AGE_MS {
                 warn!(
-                    session_id = %session_id,
+                    session_id = %id.session_id,
                     age_ms = age,
                     "rejecting stale handshake"
                 );
@@ -278,71 +316,81 @@ fn handle_route(
             }
 
             info!(
-                session_id = %session_id,
+                session_id = %id.session_id,
                 peer_fingerprint = %handshake.fingerprint,
                 "peer handshake received"
             );
 
             let keys = derive_session_keys(
                 PeerRole::Host,
-                session_id,
-                local_secret,
+                &id.session_id,
+                id.local_secret,
                 handshake.public_key,
             )?;
 
             // Compute our outbound confirmation MAC and the expected peer MAC.
-            let our_mac = compute_handshake_mac(&keys.tx, local_public, &handshake.public_key, session_id);
-            let peer_mac = compute_handshake_mac(&keys.rx, &handshake.public_key, local_public, session_id);
+            let our_mac = compute_handshake_mac(
+                &keys.tx,
+                &id.local_public,
+                &handshake.public_key,
+                &id.session_id,
+            );
+            let peer_mac = compute_handshake_mac(
+                &keys.rx,
+                &handshake.public_key,
+                &id.local_public,
+                &id.session_id,
+            );
 
-            *secure_channel = Some(SecureChannel::new(keys));
-            *channel_confirmed = false;
-            *expected_peer_mac = Some(peer_mac);
+            chan.channel = Some(SecureChannel::new(keys));
+            chan.confirmed = false;
+            chan.expected_peer_mac = Some(peer_mac);
 
-            send_peer_frame(relay_tx, session_id, PeerFrame::HandshakeConfirm(HandshakeConfirm { mac: our_mac }))?;
+            send_peer_frame(
+                relay_tx,
+                &id.session_id,
+                PeerFrame::HandshakeConfirm(HandshakeConfirm { mac: our_mac }),
+            )?;
         }
         PeerFrame::HandshakeConfirm(confirm) => {
-            let Some(expected) = expected_peer_mac else {
-                warn!(session_id = %session_id, "received HandshakeConfirm without pending handshake");
+            let Some(expected) = &chan.expected_peer_mac else {
+                warn!(session_id = %id.session_id, "received HandshakeConfirm without pending handshake");
                 return Ok(());
             };
 
-            // Constant-time comparison: the expected MAC was pre-computed using
-            // the peer's TX key (our RX key) over (peer_public || local_public || session_id).
             if confirm.mac != *expected {
-                warn!(session_id = %session_id, "handshake confirmation MAC mismatch — tearing down channel");
-                *secure_channel = None;
-                *channel_confirmed = false;
-                *expected_peer_mac = None;
+                warn!(session_id = %id.session_id, "handshake confirmation MAC mismatch — tearing down channel");
+                chan.reset();
                 return Ok(());
             }
 
-            info!(session_id = %session_id, "handshake confirmed, channel trusted");
-            *channel_confirmed = true;
-            *expected_peer_mac = None;
+            info!(session_id = %id.session_id, "handshake confirmed, channel trusted");
+            chan.confirmed = true;
+            chan.expected_peer_mac = None;
 
             // Drain backlog now that channel is confirmed.
             while let Some(bytes) = output_backlog.pop_front() {
-                if let Some(ch) = secure_channel.as_mut() {
+                if let Some(ch) = chan.channel.as_mut() {
                     let sealed = ch.seal(&SecureMessage::PtyOutput(bytes))?;
-                    send_peer_frame(relay_tx, session_id, PeerFrame::Secure(sealed))?;
+                    send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
                 }
             }
 
             let notice =
                 SecureMessage::Notification(terminal_relay_core::protocol::PushNotification {
-                    title: format!("Connected to {tool_name}"),
+                    title: format!("Connected to {}", id.tool_name),
                     body: "Session encryption established".to_string(),
                 });
-            if let Some(ch) = secure_channel.as_mut() {
+            if let Some(ch) = chan.channel.as_mut() {
                 let sealed = ch.seal(&notice)?;
-                send_peer_frame(relay_tx, session_id, PeerFrame::Secure(sealed))?;
+                send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
             }
         }
         PeerFrame::Secure(sealed) => {
-            if !*channel_confirmed {
+            if !chan.confirmed {
                 return Ok(());
             }
-            let Some(channel) = secure_channel.as_mut() else {
+            let Some(channel) = chan.channel.as_mut() else {
                 return Ok(());
             };
             let message = channel.open(&sealed)?;
@@ -417,6 +465,9 @@ async fn connect_host(
     .await
 }
 
+/// Maximum number of reconnect attempts before giving up.
+const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+
 async fn reconnect_host(
     relay_url: &str,
     session_id: &str,
@@ -427,23 +478,38 @@ async fn reconnect_host(
     terminal_relay_core::protocol::RegisterResponse,
 )> {
     let mut delay = Duration::from_secs(1);
-    loop {
-        match connect_host(
-            relay_url,
-            session_id,
-            pairing_code,
-            Some(resume_token.to_string()),
-        )
-        .await
-        {
-            Ok(connection) => return Ok(connection),
-            Err(err) => {
-                warn!(error = %err, "host reconnect attempt failed");
-                sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));
+    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+        tokio::select! {
+            result = connect_host(
+                relay_url,
+                session_id,
+                pairing_code,
+                Some(resume_token.to_string()),
+            ) => {
+                match result {
+                    Ok(connection) => return Ok(connection),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            attempt = attempt,
+                            max = MAX_RECONNECT_ATTEMPTS,
+                            "host reconnect attempt failed"
+                        );
+                    }
+                }
+            }
+            _ = shutdown_signal() => {
+                return Err(anyhow::anyhow!("reconnect interrupted by shutdown signal"));
             }
         }
+        if attempt < MAX_RECONNECT_ATTEMPTS {
+            sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(30));
+        }
     }
+    Err(anyhow::anyhow!(
+        "failed to reconnect after {MAX_RECONNECT_ATTEMPTS} attempts"
+    ))
 }
 
 fn queue_backlog(queue: &mut VecDeque<Vec<u8>>, bytes: Vec<u8>) {
@@ -493,4 +559,21 @@ fn chrono_ish_now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or_default();
     format!("unix:{now}")
+}
+
+/// Wait for SIGINT (ctrl-c) or SIGTERM.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }
