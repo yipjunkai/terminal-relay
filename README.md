@@ -113,10 +113,6 @@ cargo run -p terminal-relay-cli -- start --relay-url ws://127.0.0.1:8080/ws --to
 cargo run -p terminal-relay-cli -- attach --pairing-uri "termrelay://pair?..."
 ```
 
-## Current status
-
-Working foundation with PTY relay, reconnect, QR pairing, E2E encryption, and session persistence. See [TODO.md](TODO.md) for the roadmap.
-
 ## License
 
 Terminal Relay is licensed under either of
