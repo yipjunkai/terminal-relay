@@ -6,7 +6,7 @@ use anyhow::Context;
 use axum::{Router, routing::get};
 use clap::Parser;
 use tokio::net::TcpListener;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::relay::{RelayState, health_handler, ws_handler};
 
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let cleanup_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    let cleanup_handle = tokio::spawn(async move {
         cleanup_state.cleanup_loop().await;
     });
 
@@ -47,14 +47,43 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    info!(bind = %args.bind, min_version = %args.min_version, "relay server ready");
+    info!(
+        bind = %args.bind,
+        min_version = %args.min_version,
+        version = env!("CARGO_PKG_VERSION"),
+        "relay server ready"
+    );
     let listener = TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed binding to {}", args.bind))?;
 
-    if let Err(err) = axum::serve(listener, app).await {
-        warn!(error = %err, "relay server terminated");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("relay server error")?;
+
+    info!("shutting down");
+    cleanup_handle.abort();
+    Ok(())
+}
+
+/// Wait for SIGINT (ctrl-c) or SIGTERM for graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => { info!("received SIGINT, initiating graceful shutdown"); }
+            _ = sigterm.recv() => { info!("received SIGTERM, initiating graceful shutdown"); }
+        }
     }
 
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+        info!("received SIGINT, initiating graceful shutdown");
+    }
 }

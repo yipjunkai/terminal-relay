@@ -1820,6 +1820,7 @@ dependencies = [
  "futures-util",
  "rand 0.8.5",
  "semver",
+ "serde_json",
  "terminal-relay-core",
  "tokio",
  "tracing",

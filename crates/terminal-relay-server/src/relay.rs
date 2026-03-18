@@ -90,6 +90,10 @@ impl RelayState {
         }
     }
 
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     pub async fn cleanup_loop(self: Arc<Self>) {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -98,7 +102,15 @@ impl RelayState {
             self.sessions.retain(|session_id, session| {
                 let keep = now.duration_since(session.last_activity) <= self.session_ttl;
                 if !keep {
-                    info!(session_id = %session_id, "expired stale session");
+                    info!(session_id = %session_id, "expiring stale session, notifying peers");
+                    let expiry_msg = RelayMessage::Error(RelayError {
+                        message: "session expired due to inactivity".to_string(),
+                    });
+                    for slot in [&session.host, &session.client] {
+                        if let Some(sender) = &slot.sender {
+                            let _ = sender.send(expiry_msg.clone());
+                        }
+                    }
                 }
                 keep
             });
@@ -162,10 +174,10 @@ impl RelayState {
                     }
                 }
 
-                if let Some(token) = &request.resume_token {
-                    if token != &host.resume_token {
-                        return Err("invalid host resume token".into());
-                    }
+                if let Some(token) = &request.resume_token
+                    && token != &host.resume_token
+                {
+                    return Err("invalid host resume token".into());
                 }
 
                 host.sender = Some(sender);
@@ -178,6 +190,7 @@ impl RelayState {
             session.last_activity = Instant::now();
 
             return Ok(RegisterResponse {
+                server_version: env!("CARGO_PKG_VERSION").to_string(),
                 resume_token,
                 peer_online,
                 session_ttl_secs: self.session_ttl.as_secs(),
@@ -213,10 +226,10 @@ impl RelayState {
                 }
             }
 
-            if let Some(token) = &request.resume_token {
-                if token != &client.resume_token {
-                    return Err("invalid client resume token".into());
-                }
+            if let Some(token) = &request.resume_token
+                && token != &client.resume_token
+            {
+                return Err("invalid client resume token".into());
             }
 
             client.sender = Some(sender);
@@ -229,6 +242,7 @@ impl RelayState {
         session.last_activity = Instant::now();
 
         Ok(RegisterResponse {
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
             resume_token,
             peer_online,
             session_ttl_secs: self.session_ttl.as_secs(),
@@ -321,10 +335,10 @@ fn validate_register_request(request: &RegisterRequest) -> Result<(), String> {
     }
 
     // resume_token (optional)
-    if let Some(token) = &request.resume_token {
-        if token.len() > MAX_RESUME_TOKEN_LEN {
-            return Err("resume_token exceeds maximum length".into());
-        }
+    if let Some(token) = &request.resume_token
+        && token.len() > MAX_RESUME_TOKEN_LEN
+    {
+        return Err("resume_token exceeds maximum length".into());
     }
 
     Ok(())
@@ -337,12 +351,19 @@ fn is_valid_pairing_code(code: &str) -> bool {
         return false;
     }
     parts.iter().all(|part| {
-        part.len() == 6 && part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        part.len() == 6
+            && part
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     })
 }
 
-pub async fn health_handler() -> Json<&'static str> {
-    Json("ok")
+pub async fn health_handler(State(state): State<Arc<RelayState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "sessions": state.session_count(),
+    }))
 }
 
 pub async fn ws_handler(

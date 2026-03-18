@@ -11,19 +11,16 @@ Items are roughly ordered by priority within each phase.
 - [x] Validate `session_id` (UUID v4 format) and `pairing_code` format on the server. Enforce max lengths on all `RegisterRequest` string fields.
 - [x] Rate-limit failed pairing-code attempts per session on the relay. Lock out after 5 failures with per-session counter and warning logs.
 
-## Phase 2: Relay reliability & deployment (current)
+## Phase 2: Relay reliability (complete)
 
-- [ ] Add server versioning: include `server_version` (from `CARGO_PKG_VERSION`) in `RegisterResponse` and in the `/health` endpoint JSON response.
-- [ ] Add graceful shutdown to the relay server (`tokio::signal` + `with_graceful_shutdown`). Send WebSocket close frames and cancel the cleanup loop.
-- [ ] Handle SIGTERM (not just SIGINT) on the host for clean shutdown in containers.
-- [ ] Wrap `connect_async` and initial registration exchange in `tokio::time::timeout()` to prevent hangs on unresponsive servers.
-- [ ] Add a maximum retry count or total timeout to reconnect loops. Use `tokio::select!` with `ctrl_c()` inside the loop so users can interrupt.
-- [ ] Notify connected peers before removing expired sessions in the cleanup loop.
-- [ ] Deploy the relay server to a cloud provider (Fly.io, Railway, or similar). Set up `wss://relay.terminal-relay.dev/ws` for production.
-- [ ] Add TLS termination (via reverse proxy or native rustls) for the production relay.
-- [ ] Set up a development relay at `wss://dev-relay.terminal-relay.dev/ws` for beta testing.
+- [x] Add server versioning: `server_version` (from `CARGO_PKG_VERSION`) in `RegisterResponse` and structured JSON `/healthz` endpoint with version + session count.
+- [x] Add graceful shutdown to the relay server (`with_graceful_shutdown`, SIGINT + SIGTERM). Cancel cleanup loop on exit.
+- [x] Handle SIGTERM (not just SIGINT) on host and attach for clean shutdown in containers.
+- [x] Wrap `connect_async` and initial registration exchange in `tokio::time::timeout(15s)` to prevent hangs on unresponsive servers.
+- [x] Add bounded reconnect loops (max 10 attempts, exponential backoff) with shutdown signal interrupt via `tokio::select!`.
+- [x] Notify connected peers with error message before removing expired sessions in the cleanup loop.
 
-## Phase 3: Protocol extensions (pre-native-app)
+## Phase 3: Protocol extensions (current)
 
 These wire types need to exist before native iOS/Android clients ship, to avoid breaking protocol changes later.
 
@@ -33,7 +30,13 @@ These wire types need to exist before native iOS/Android clients ship, to avoid 
 - [ ] Actually send `VersionNotice` when peers connect with older versions.
 - [ ] Send a `SessionEnded { exit_code }` message to the attached client when the PTY child exits.
 
-## Phase 4: Native mobile apps
+## Phase 4: Relay deployment (pre-native-app)
+
+- [ ] Deploy the relay server to a cloud provider (Fly.io, Railway, or similar). Set up `wss://relay.terminal-relay.dev/ws` for production.
+- [ ] Add TLS termination (via reverse proxy or native rustls) for the production relay.
+- [ ] Set up a development relay at `wss://dev-relay.terminal-relay.dev/ws` for beta testing.
+
+## Phase 5: Native mobile apps
 
 - [ ] Build native iOS app (Swift) with terminal rendering, QR/URI pairing, E2E encryption (CryptoKit X25519 + AES-GCM), and bidirectional input.
 - [ ] Add speech-to-code on iOS: on-device Speech framework recognition that converts voice commands into coding actions (refactor, commit, debug) sent as encrypted `VoiceCommand` messages to the host session.
@@ -42,7 +45,7 @@ These wire types need to exist before native iOS/Android clients ship, to avoid 
 - [ ] Add push notifications via APNS (iOS) and FCM (Android) for session events (peer connected, session ended, tool output idle).
 - [ ] Generate shareable web URLs (e.g. `https://terminal-relay.dev/s/<token>`) that open the app or fall back to a web client with pairing info embedded.
 
-## Phase 5: Web client (deferred)
+## Phase 6: Web client (deferred)
 
 Lower priority since native apps are the primary mobile strategy. Web client serves as fallback and desktop attach option.
 
@@ -54,7 +57,7 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 - [x] Hardcode the production relay URL into the CLI binary so users never configure it. Support environment-based URL selection (production, development, local) via env var (`TERMINAL_RELAY_URL`).
 - [ ] Add authn/authz and tenant isolation for the hosted relay (API keys, account system, or anonymous with rate limits).
 - [ ] Add a maximum session count and per-IP session limits on the relay to prevent abuse.
-- [ ] Enrich the `/healthz` endpoint to return structured JSON with session count, uptime, and server version.
+- [x] Enrich the `/healthz` endpoint to return structured JSON with session count and server version. _(Done in Phase 2.)_
 - [ ] Add multi-region relay support with geo-routing so clients connect to the nearest relay for lower latency.
 
 ## User experience
@@ -94,7 +97,7 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 - [ ] Add unit tests for `relay.rs` (registration, cleanup, version validation).
 - [ ] Add integration tests for relay registration, encrypted handshake, reconnect/resume, and replay protection.
 - [ ] Extract duplicated functions (`now_millis`, `send_handshake`, `send_peer_frame`) from `host.rs` and `attach.rs` into a shared module.
-- [ ] Remove or wire up `#[allow(dead_code)]` items in `state.rs` (`load()`, `ensure_path_exists()`).
+- [x] Remove `ensure_path_exists()` from `state.rs` (replaced by `ensure_dir` in rewrite). `load()` is used in tests and retained with `#[allow(dead_code)]` until session resume is implemented.
 - [ ] Use RFC 3339 timestamps in `SessionRecord.created_at` instead of the non-standard `"unix:..."` format.
 
 ## Packaging & distribution

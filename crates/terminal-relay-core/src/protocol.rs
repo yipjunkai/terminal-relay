@@ -1,4 +1,4 @@
-use bincode::config::{standard, Configuration};
+use bincode::config::{Configuration, standard};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
@@ -32,6 +32,7 @@ pub struct RegisterRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterResponse {
+    pub server_version: String,
     pub resume_token: String,
     pub peer_online: bool,
     pub session_ttl_secs: u64,
@@ -195,6 +196,7 @@ mod tests {
     #[test]
     fn relay_registered_roundtrip() {
         relay_roundtrip(&RelayMessage::Registered(RegisterResponse {
+            server_version: "0.1.0".to_string(),
             resume_token: "tok".to_string(),
             peer_online: true,
             session_ttl_secs: 3600,
