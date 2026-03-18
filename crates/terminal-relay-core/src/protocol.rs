@@ -1,4 +1,3 @@
-use bincode::config::{Configuration, standard};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
@@ -123,7 +122,7 @@ pub struct VoiceAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecureMessage {
-    // ── Existing variants (do NOT reorder — bincode uses positional discriminants) ──
+    // ── Core variants ──
     PtyInput(Vec<u8>),
     PtyOutput(Vec<u8>),
     Resize {
@@ -136,7 +135,7 @@ pub enum SecureMessage {
     },
     Notification(PushNotification),
 
-    // ── New variants (append only — never insert above existing variants) ──
+    // ── Extended variants ──
     /// Sent by the host when the PTY child process exits.
     SessionEnded {
         exit_code: i32,
@@ -156,43 +155,32 @@ pub enum SecureMessage {
     Unknown(Vec<u8>),
 }
 
-pub fn wire_config() -> Configuration {
-    standard()
-}
-
 pub fn encode_relay(message: &RelayMessage) -> CoreResult<Vec<u8>> {
-    bincode::serde::encode_to_vec(message, wire_config())
-        .map_err(|err| CoreError::Serialization(err.to_string()))
+    rmp_serde::to_vec(message).map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
 pub fn decode_relay(bytes: &[u8]) -> CoreResult<RelayMessage> {
-    bincode::serde::decode_from_slice(bytes, wire_config())
-        .map(|(message, _)| message)
-        .map_err(|err| CoreError::Deserialization(err.to_string()))
+    rmp_serde::from_slice(bytes).map_err(|err| CoreError::Deserialization(err.to_string()))
 }
 
 pub fn encode_peer_frame(frame: &PeerFrame) -> CoreResult<Vec<u8>> {
-    bincode::serde::encode_to_vec(frame, wire_config())
-        .map_err(|err| CoreError::Serialization(err.to_string()))
+    rmp_serde::to_vec(frame).map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
 pub fn decode_peer_frame(bytes: &[u8]) -> CoreResult<PeerFrame> {
-    bincode::serde::decode_from_slice(bytes, wire_config())
-        .map(|(frame, _)| frame)
-        .map_err(|err| CoreError::Deserialization(err.to_string()))
+    rmp_serde::from_slice(bytes).map_err(|err| CoreError::Deserialization(err.to_string()))
 }
 
 pub fn encode_secure_message(message: &SecureMessage) -> CoreResult<Vec<u8>> {
-    bincode::serde::encode_to_vec(message, wire_config())
-        .map_err(|err| CoreError::Serialization(err.to_string()))
+    rmp_serde::to_vec(message).map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
 /// Decode a `SecureMessage`, falling back to `SecureMessage::Unknown` for unrecognized variants.
 /// This provides forward compatibility: older clients receiving messages with new variant
 /// discriminants will get `Unknown` instead of a deserialization error.
 pub fn decode_secure_message(bytes: &[u8]) -> CoreResult<SecureMessage> {
-    match bincode::serde::decode_from_slice(bytes, wire_config()) {
-        Ok((message, _)) => Ok(message),
+    match rmp_serde::from_slice(bytes) {
+        Ok(message) => Ok(message),
         Err(_) => Ok(SecureMessage::Unknown(bytes.to_vec())),
     }
 }
