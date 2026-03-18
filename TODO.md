@@ -80,7 +80,7 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 ## CLI features
 
 - [x] Add `--version` flag to the CLI (`#[command(version)]`).
-- [ ] Add session management subcommands: `session kill <id>`, `session delete <id>`, `session clean` (purge stale).
+- [ ] Add `session` subcommand group: `session stop <id>` / `session stop --all` to kill sessions, `session status` for live info (running process, connected peers, uptime), `session cleanup` to remove stale session files.
 - [ ] Add an SSH-style escape sequence (e.g. `~.` to detach, `~~` to send literal `~`) for clean detach and Ctrl-C forwarding.
 - [ ] Show a status indicator on the attach side when the secure channel is not yet established, instead of silently dropping input.
 - [ ] Strengthen session persistence and recovery by restoring active host sessions after CLI restart.
