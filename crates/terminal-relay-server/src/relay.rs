@@ -13,8 +13,8 @@ use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, info, warn};
 
 use terminal_relay_core::protocol::{
-    PROTOCOL_VERSION, PeerRole, PeerStatus, RegisterRequest, RegisterResponse, RelayError,
-    RelayMessage, RelayRoute, decode_relay, encode_relay,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerRole, PeerStatus, RegisterRequest,
+    RegisterResponse, RelayError, RelayMessage, RelayRoute, decode_relay, encode_relay,
 };
 
 #[derive(Clone)]
@@ -136,12 +136,21 @@ impl RelayState {
     ) -> Result<RegisterResponse, String> {
         validate_register_request(request)?;
 
-        if request.protocol_version != PROTOCOL_VERSION {
+        // Protocol version range negotiation:
+        // Client advertises [min..max], server supports [PROTOCOL_VERSION_MIN..PROTOCOL_VERSION].
+        // The negotiated version is the highest version both sides support.
+        let client_max = request.protocol_version;
+        let client_min = request.protocol_version_min.unwrap_or(client_max);
+        let server_max = PROTOCOL_VERSION;
+        let server_min = PROTOCOL_VERSION_MIN;
+
+        let negotiated = std::cmp::min(client_max, server_max);
+        if negotiated < client_min || negotiated < server_min {
             return Err(format!(
-                "unsupported protocol version {}, expected {}",
-                request.protocol_version, PROTOCOL_VERSION
+                "no compatible protocol version: client supports {client_min}-{client_max}, server supports {server_min}-{server_max}"
             ));
         }
+
         self.validate_version(&request.client_version)?;
 
         if request.role == PeerRole::Host {
@@ -191,6 +200,7 @@ impl RelayState {
 
             return Ok(RegisterResponse {
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
+                negotiated_protocol_version: negotiated,
                 resume_token,
                 peer_online,
                 session_ttl_secs: self.session_ttl.as_secs(),
@@ -243,6 +253,7 @@ impl RelayState {
 
         Ok(RegisterResponse {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
+            negotiated_protocol_version: negotiated,
             resume_token,
             peer_online,
             session_ttl_secs: self.session_ttl.as_secs(),

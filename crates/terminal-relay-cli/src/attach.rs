@@ -15,8 +15,9 @@ use terminal_relay_core::{
     },
     pairing::{PairingUri, parse_pairing_uri},
     protocol::{
-        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PeerFrame, PeerRole, RegisterRequest,
-        RelayMessage, RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
+        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
+        RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
+        encode_peer_frame,
     },
 };
 
@@ -312,9 +313,21 @@ async fn handle_route(
                         .await?;
                     stdout.flush().await?;
                 }
+                SecureMessage::SessionEnded { exit_code } => {
+                    stdout
+                        .write_all(
+                            format!("\r\n[session ended] exit code: {exit_code}\r\n").as_bytes(),
+                        )
+                        .await?;
+                    stdout.flush().await?;
+                }
                 SecureMessage::Heartbeat
                 | SecureMessage::Resize { .. }
-                | SecureMessage::PtyInput(_) => {}
+                | SecureMessage::PtyInput(_)
+                | SecureMessage::Clipboard { .. }
+                | SecureMessage::ReadOnly { .. }
+                | SecureMessage::VoiceCommand(_)
+                | SecureMessage::Unknown(_) => {}
             }
         }
         PeerFrame::KeepAlive => {}
@@ -400,6 +413,7 @@ async fn connect_client(
         &pairing.relay_url,
         RegisterRequest {
             protocol_version: PROTOCOL_VERSION,
+            protocol_version_min: Some(PROTOCOL_VERSION_MIN),
             client_version: crate::constants::CLIENT_VERSION.to_string(),
             session_id: pairing.session_id.clone(),
             pairing_code: pairing.pairing_code.clone(),

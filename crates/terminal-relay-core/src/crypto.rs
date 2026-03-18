@@ -280,6 +280,17 @@ mod tests {
                 title: "Test".to_string(),
                 body: "Hello".to_string(),
             }),
+            SecureMessage::SessionEnded { exit_code: 0 },
+            SecureMessage::Clipboard {
+                content: "hello".to_string(),
+            },
+            SecureMessage::ReadOnly { enabled: true },
+            SecureMessage::VoiceCommand(crate::protocol::VoiceAction {
+                transcript: "refactor this function".to_string(),
+                intent: Some("refactor".to_string()),
+                confidence: 0.95,
+            }),
+            SecureMessage::Unknown(vec![0xff, 0xfe]),
         ];
 
         for msg in &messages {

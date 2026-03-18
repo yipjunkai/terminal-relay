@@ -20,15 +20,12 @@ Items are roughly ordered by priority within each phase.
 - [x] Add bounded reconnect loops (max 10 attempts, exponential backoff) with shutdown signal interrupt via `tokio::select!`.
 - [x] Notify connected peers with error message before removing expired sessions in the cleanup loop.
 
-## Phase 3: Protocol extensions (current)
+## Phase 3: Protocol extensions (complete)
 
-These wire types need to exist before native iOS/Android clients ship, to avoid breaking protocol changes later.
-
-- [ ] Add `SessionEnded { exit_code }`, `Clipboard`, `ReadOnly`, and `VoiceCommand` variants to `SecureMessage`.
-- [ ] Add forward-compatible extensibility to the wire format so new `SecureMessage` variants don't break old clients.
-- [ ] Implement version range negotiation (client sends min/max, server selects) instead of strict equality on `PROTOCOL_VERSION`.
-- [ ] Actually send `VersionNotice` when peers connect with older versions.
-- [ ] Send a `SessionEnded { exit_code }` message to the attached client when the PTY child exits.
+- [x] Add `SessionEnded { exit_code }`, `Clipboard`, `ReadOnly`, and `VoiceCommand` variants to `SecureMessage`. Added `VoiceAction` struct for structured speech-to-code payloads.
+- [x] Add forward-compatible extensibility: `decode_secure_message` returns `Unknown(Vec<u8>)` instead of erroring on unrecognized variants. All handlers silently ignore `Unknown`.
+- [x] Implement version range negotiation: client sends `protocol_version` (max) and `protocol_version_min`, server selects highest mutually supported version and returns `negotiated_protocol_version`. Bumped to protocol v2, supporting v1-v2.
+- [x] Send `SessionEnded { exit_code }` to the attached client when the PTY child exits. Attach side displays the exit code.
 
 ## Phase 4: Relay deployment (pre-native-app)
 
@@ -44,6 +41,7 @@ These wire types need to exist before native iOS/Android clients ship, to avoid 
 - [ ] Add speech-to-code on Android using on-device ML Kit speech recognition.
 - [ ] Add push notifications via APNS (iOS) and FCM (Android) for session events (peer connected, session ended, tool output idle).
 - [ ] Generate shareable web URLs (e.g. `https://terminal-relay.dev/s/<token>`) that open the app or fall back to a web client with pairing info embedded.
+- [ ] Add `protocol_version` to the peer-to-peer `Handshake` struct so peers can compare versions and send `VersionNotice` to prompt updates on older clients.
 
 ## Phase 6: Web client (deferred)
 

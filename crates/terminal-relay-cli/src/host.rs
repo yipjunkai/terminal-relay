@@ -18,8 +18,9 @@ use terminal_relay_core::{
     },
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
     protocol::{
-        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PeerFrame, PeerRole, RegisterRequest,
-        RelayMessage, RelayRoute, SecureMessage, decode_peer_frame, encode_peer_frame,
+        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
+        RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
+        encode_peer_frame,
     },
 };
 
@@ -280,6 +281,15 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
             exit_code = &mut exit_rx => {
                 let code = exit_code.unwrap_or(1);
                 info!(session_id = %identity.session_id, code = code, "PTY process exited");
+                // Notify the attached client that the session has ended.
+                if chan.confirmed
+                    && let Some(channel) = chan.channel.as_mut()
+                {
+                    let msg = SecureMessage::SessionEnded { exit_code: code };
+                    if let Ok(sealed) = channel.seal(&msg) {
+                        let _ = send_peer_frame(&relay_tx, &identity.session_id, PeerFrame::Secure(sealed));
+                    }
+                }
                 break;
             }
             _ = &mut shutdown => {
@@ -401,10 +411,19 @@ fn handle_route(
                 SecureMessage::Resize { cols, rows } => {
                     pty.resize(cols, rows)?;
                 }
+                SecureMessage::VoiceCommand(action) => {
+                    // Convert voice command to PTY input.
+                    // For now, send the raw transcript. Future: interpret intent.
+                    pty.send_input(action.transcript.into_bytes())?;
+                }
                 SecureMessage::Heartbeat
                 | SecureMessage::VersionNotice { .. }
                 | SecureMessage::Notification(_)
-                | SecureMessage::PtyOutput(_) => {}
+                | SecureMessage::PtyOutput(_)
+                | SecureMessage::SessionEnded { .. }
+                | SecureMessage::Clipboard { .. }
+                | SecureMessage::ReadOnly { .. }
+                | SecureMessage::Unknown(_) => {}
             }
         }
         PeerFrame::KeepAlive => {}
@@ -455,6 +474,7 @@ async fn connect_host(
         relay_url,
         RegisterRequest {
             protocol_version: PROTOCOL_VERSION,
+            protocol_version_min: Some(PROTOCOL_VERSION_MIN),
             client_version: crate::constants::CLIENT_VERSION.to_string(),
             session_id: session_id.to_string(),
             pairing_code: pairing_code.to_string(),

@@ -3,7 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Current protocol version. Bump when adding breaking wire format changes.
+pub const PROTOCOL_VERSION: u16 = 2;
+
+/// Minimum protocol version this build supports.
+pub const PROTOCOL_VERSION_MIN: u16 = 1;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum PeerRole {
@@ -23,6 +27,9 @@ impl PeerRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub protocol_version: u16,
+    /// Minimum protocol version the client supports (for range negotiation).
+    /// If absent, assumed equal to `protocol_version` (strict match, legacy behavior).
+    pub protocol_version_min: Option<u16>,
     pub client_version: String,
     pub session_id: String,
     pub pairing_code: String,
@@ -33,6 +40,8 @@ pub struct RegisterRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub server_version: String,
+    /// The protocol version selected by the server (highest mutually supported).
+    pub negotiated_protocol_version: u16,
     pub resume_token: String,
     pub peer_online: bool,
     pub session_ttl_secs: u64,
@@ -101,14 +110,50 @@ pub struct PushNotification {
     pub body: String,
 }
 
+/// Action requested by a voice command from a mobile client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceAction {
+    /// The raw transcribed text from speech recognition.
+    pub transcript: String,
+    /// A structured intent (e.g. "refactor", "commit", "debug"), if recognized.
+    pub intent: Option<String>,
+    /// Confidence score from the speech recognizer (0.0 to 1.0).
+    pub confidence: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecureMessage {
+    // ── Existing variants (do NOT reorder — bincode uses positional discriminants) ──
     PtyInput(Vec<u8>),
     PtyOutput(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Heartbeat,
-    VersionNotice { minimum_version: String },
+    VersionNotice {
+        minimum_version: String,
+    },
     Notification(PushNotification),
+
+    // ── New variants (append only — never insert above existing variants) ──
+    /// Sent by the host when the PTY child process exits.
+    SessionEnded {
+        exit_code: i32,
+    },
+    /// Clipboard content shared between peers.
+    Clipboard {
+        content: String,
+    },
+    /// Sent by the host to indicate this session is read-only (no input accepted).
+    ReadOnly {
+        enabled: bool,
+    },
+    /// Voice command from a mobile client, transcribed on-device.
+    VoiceCommand(VoiceAction),
+    /// Unknown message from a newer protocol version. Receivers should silently ignore this.
+    /// This must remain the LAST variant.
+    Unknown(Vec<u8>),
 }
 
 pub fn wire_config() -> Configuration {
@@ -142,10 +187,14 @@ pub fn encode_secure_message(message: &SecureMessage) -> CoreResult<Vec<u8>> {
         .map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
+/// Decode a `SecureMessage`, falling back to `SecureMessage::Unknown` for unrecognized variants.
+/// This provides forward compatibility: older clients receiving messages with new variant
+/// discriminants will get `Unknown` instead of a deserialization error.
 pub fn decode_secure_message(bytes: &[u8]) -> CoreResult<SecureMessage> {
-    bincode::serde::decode_from_slice(bytes, wire_config())
-        .map(|(message, _)| message)
-        .map_err(|err| CoreError::Deserialization(err.to_string()))
+    match bincode::serde::decode_from_slice(bytes, wire_config()) {
+        Ok((message, _)) => Ok(message),
+        Err(_) => Ok(SecureMessage::Unknown(bytes.to_vec())),
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +222,7 @@ mod tests {
     fn relay_register_roundtrip() {
         relay_roundtrip(&RelayMessage::Register(RegisterRequest {
             protocol_version: PROTOCOL_VERSION,
+            protocol_version_min: Some(PROTOCOL_VERSION_MIN),
             client_version: "0.1.0".to_string(),
             session_id: "sess-123".to_string(),
             pairing_code: "ABC-DEF".to_string(),
@@ -185,6 +235,7 @@ mod tests {
     fn relay_register_with_resume_token() {
         relay_roundtrip(&RelayMessage::Register(RegisterRequest {
             protocol_version: PROTOCOL_VERSION,
+            protocol_version_min: None,
             client_version: "0.1.0".to_string(),
             session_id: "sess-123".to_string(),
             pairing_code: "ABC-DEF".to_string(),
@@ -197,6 +248,7 @@ mod tests {
     fn relay_registered_roundtrip() {
         relay_roundtrip(&RelayMessage::Registered(RegisterResponse {
             server_version: "0.1.0".to_string(),
+            negotiated_protocol_version: PROTOCOL_VERSION,
             resume_token: "tok".to_string(),
             peer_online: true,
             session_ttl_secs: 3600,
@@ -325,6 +377,51 @@ mod tests {
     }
 
     #[test]
+    fn secure_session_ended_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::SessionEnded { exit_code: 0 });
+        secure_msg_roundtrip(&SecureMessage::SessionEnded { exit_code: -1 });
+    }
+
+    #[test]
+    fn secure_clipboard_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::Clipboard {
+            content: "copied text".to_string(),
+        });
+    }
+
+    #[test]
+    fn secure_read_only_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::ReadOnly { enabled: true });
+        secure_msg_roundtrip(&SecureMessage::ReadOnly { enabled: false });
+    }
+
+    #[test]
+    fn secure_voice_command_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::VoiceCommand(VoiceAction {
+            transcript: "commit changes".to_string(),
+            intent: Some("commit".to_string()),
+            confidence: 0.92,
+        }));
+        secure_msg_roundtrip(&SecureMessage::VoiceCommand(VoiceAction {
+            transcript: "um maybe refactor".to_string(),
+            intent: None,
+            confidence: 0.3,
+        }));
+    }
+
+    #[test]
+    fn secure_unknown_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::Unknown(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn decode_secure_message_returns_unknown_for_garbage() {
+        // Forward compatibility: garbage input should return Unknown, not an error.
+        let result = decode_secure_message(&[0xff, 0xff, 0xff]);
+        assert!(matches!(result, Ok(SecureMessage::Unknown(_))));
+    }
+
+    #[test]
     fn secure_empty_payloads() {
         secure_msg_roundtrip(&SecureMessage::PtyInput(vec![]));
         secure_msg_roundtrip(&SecureMessage::PtyOutput(vec![]));
@@ -351,8 +448,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_secure_message_rejects_garbage() {
-        assert!(decode_secure_message(&[0xff, 0xff, 0xff]).is_err());
-        assert!(decode_secure_message(&[]).is_err());
+    fn decode_secure_message_empty_returns_unknown() {
+        // Empty input is also treated as Unknown for forward compatibility.
+        let result = decode_secure_message(&[]);
+        assert!(matches!(result, Ok(SecureMessage::Unknown(_))));
     }
 }
