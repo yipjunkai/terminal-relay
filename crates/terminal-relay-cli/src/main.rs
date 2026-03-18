@@ -1,5 +1,6 @@
 mod ai_tools;
 mod attach;
+mod common;
 mod constants;
 mod host;
 mod pty;
@@ -21,6 +22,7 @@ use crate::{
 
 #[derive(Debug, Parser)]
 #[command(name = constants::APP_NAME)]
+#[command(version)]
 #[command(about = "Mirror local terminal AI sessions to remote clients")]
 struct Cli {
     #[command(subcommand)]

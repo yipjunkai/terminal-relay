@@ -72,7 +72,7 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 
 ## CLI features
 
-- [ ] Add `--version` flag to the CLI (`#[command(version)]`).
+- [x] Add `--version` flag to the CLI (`#[command(version)]`).
 - [ ] Add session management subcommands: `session kill <id>`, `session delete <id>`, `session clean` (purge stale).
 - [ ] Add an SSH-style escape sequence (e.g. `~.` to detach, `~~` to send literal `~`) for clean detach and Ctrl-C forwarding.
 - [ ] Show a status indicator on the attach side when the secure channel is not yet established, instead of silently dropping input.
@@ -94,13 +94,12 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 - [x] Add unit tests for `state.rs` (save/load roundtrip, encryption verification, legacy plaintext migration, file permissions, key persistence, corruption handling). 7 tests.
 - [ ] Add unit tests for `relay.rs` (registration, cleanup, version validation).
 - [ ] Add integration tests for relay registration, encrypted handshake, reconnect/resume, and replay protection.
-- [ ] Extract duplicated functions (`now_millis`, `send_handshake`, `send_peer_frame`) from `host.rs` and `attach.rs` into a shared module.
+- [x] Extract duplicated functions (`ChannelState`, `now_millis`, `send_handshake`, `send_peer_frame`, `shutdown_signal`) from `host.rs` and `attach.rs` into `common.rs`.
 - [x] Remove `ensure_path_exists()` from `state.rs` (replaced by `ensure_dir` in rewrite). `load()` is used in tests and retained with `#[allow(dead_code)]` until session resume is implemented.
-- [ ] Use RFC 3339 timestamps in `SessionRecord.created_at` instead of the non-standard `"unix:..."` format.
+- [x] Use RFC 3339 timestamps in `SessionRecord.created_at` instead of the non-standard `"unix:..."` format. No new deps — manual UTC formatting.
 
 ## Packaging & distribution
 
-- [ ] Add a `LICENSE` file to the repository.
 - [ ] Add crate metadata (`description`, `repository`, `homepage`, `keywords`, `authors`) to all `Cargo.toml` files.
 - [ ] Publish prebuilt binaries for macOS (Intel + Apple Silicon), Linux (x64 + ARM64), and Windows (x64). Set up CI release pipeline.
 - [ ] Add `cargo install terminal-relay` support (publish `terminal-relay-cli` to crates.io).

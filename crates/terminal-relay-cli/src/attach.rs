@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Args;
@@ -15,36 +15,13 @@ use terminal_relay_core::{
     },
     pairing::{PairingUri, parse_pairing_uri},
     protocol::{
-        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
+        HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
         RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
-        encode_peer_frame,
     },
 };
 
+use crate::common::{ChannelState, now_millis, send_handshake, send_peer_frame, shutdown_signal};
 use crate::relay_client::RelayConnection;
-
-/// Mutable state for the encrypted channel during a session.
-struct ChannelState {
-    channel: Option<SecureChannel>,
-    confirmed: bool,
-    expected_peer_mac: Option<[u8; 32]>,
-}
-
-impl ChannelState {
-    fn new() -> Self {
-        Self {
-            channel: None,
-            confirmed: false,
-            expected_peer_mac: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.channel = None;
-        self.confirmed = false;
-        self.expected_peer_mac = None;
-    }
-}
 
 #[derive(Debug, Clone, Args)]
 pub struct AttachArgs {
@@ -351,36 +328,6 @@ fn send_resize(
     send_peer_frame(relay_tx, session_id, PeerFrame::Secure(sealed))
 }
 
-fn send_handshake(
-    session_id: &str,
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
-    public_key: &[u8; 32],
-    fingerprint: &str,
-    tool_name: Option<String>,
-) -> anyhow::Result<()> {
-    let frame = PeerFrame::Handshake(Handshake {
-        public_key: *public_key,
-        fingerprint: fingerprint.to_string(),
-        tool_name,
-        timestamp_ms: now_millis(),
-    });
-    send_peer_frame(relay_tx, session_id, frame)
-}
-
-fn send_peer_frame(
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
-    session_id: &str,
-    frame: PeerFrame,
-) -> anyhow::Result<()> {
-    let payload = encode_peer_frame(&frame)?;
-    relay_tx
-        .send(RelayMessage::Route(RelayRoute {
-            session_id: session_id.to_string(),
-            payload,
-        }))
-        .map_err(|_| anyhow::anyhow!("relay send channel closed"))
-}
-
 fn resolve_pairing(args: &AttachArgs) -> anyhow::Result<PairingUri> {
     if let Some(uri) = &args.pairing_uri {
         return Ok(parse_pairing_uri(uri)?);
@@ -464,13 +411,6 @@ async fn reconnect_client(
     ))
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default()
-}
-
 struct RawModeGuard;
 
 impl RawModeGuard {
@@ -483,22 +423,5 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-    }
-}
-
-/// Wait for SIGINT (ctrl-c) or SIGTERM.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.ok();
     }
 }

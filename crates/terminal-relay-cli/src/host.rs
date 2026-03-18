@@ -18,11 +18,12 @@ use terminal_relay_core::{
     },
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
     protocol::{
-        Handshake, HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
+        HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
         RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
-        encode_peer_frame,
     },
 };
+
+use crate::common::{ChannelState, now_millis, send_handshake, send_peer_frame, shutdown_signal};
 
 /// Identity and key material for the local side of a session (immutable after creation).
 struct SessionIdentity {
@@ -30,29 +31,6 @@ struct SessionIdentity {
     tool_name: String,
     local_secret: [u8; 32],
     local_public: [u8; 32],
-}
-
-/// Mutable state for the encrypted channel during a session.
-struct ChannelState {
-    channel: Option<SecureChannel>,
-    confirmed: bool,
-    expected_peer_mac: Option<[u8; 32]>,
-}
-
-impl ChannelState {
-    fn new() -> Self {
-        Self {
-            channel: None,
-            confirmed: false,
-            expected_peer_mac: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.channel = None;
-        self.confirmed = false;
-        self.expected_peer_mac = None;
-    }
 }
 
 use crate::{
@@ -162,7 +140,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         tool: tool_name.clone(),
         command: command.clone(),
         command_args: args.clone(),
-        created_at: chrono_ish_now(),
+        created_at: rfc3339_now(),
         public_key: local_key.public,
         secret_key: local_key.secret,
     };
@@ -431,36 +409,6 @@ fn handle_route(
     Ok(())
 }
 
-fn send_handshake(
-    session_id: &str,
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
-    public_key: &[u8; 32],
-    fingerprint: &str,
-    tool_name: Option<String>,
-) -> anyhow::Result<()> {
-    let frame = PeerFrame::Handshake(Handshake {
-        public_key: *public_key,
-        fingerprint: fingerprint.to_string(),
-        tool_name,
-        timestamp_ms: now_millis(),
-    });
-    send_peer_frame(relay_tx, session_id, frame)
-}
-
-fn send_peer_frame(
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
-    session_id: &str,
-    frame: PeerFrame,
-) -> anyhow::Result<()> {
-    let payload = encode_peer_frame(&frame)?;
-    relay_tx
-        .send(RelayMessage::Route(RelayRoute {
-            session_id: session_id.to_string(),
-            payload,
-        }))
-        .map_err(|_| anyhow::anyhow!("relay send channel closed"))
-}
-
 async fn connect_host(
     relay_url: &str,
     session_id: &str,
@@ -566,34 +514,32 @@ fn print_qr(data: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default()
-}
-
-fn chrono_ish_now() -> String {
-    let now = SystemTime::now()
+/// Returns the current time as an RFC 3339 UTC timestamp (e.g. "2026-03-17T16:30:00Z").
+fn rfc3339_now() -> String {
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    format!("unix:{now}")
-}
 
-/// Wait for SIGINT (ctrl-c) or SIGTERM.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.ok();
-    }
+    // Manual RFC 3339 formatting to avoid pulling in a datetime crate.
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Convert days since epoch to y/m/d using a civil calendar algorithm.
+    // Based on Howard Hinnant's algorithm (public domain).
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
