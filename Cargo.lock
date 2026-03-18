@@ -526,6 +526,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1746,9 +1752,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "terminal-relay-cli"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "clap",
  "crossterm",
@@ -1756,15 +1776,18 @@ dependencies = [
  "futures-util",
  "portable-pty",
  "qrcode",
+ "rand 0.8.5",
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "terminal-relay-core",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
  "which",
+ "zeroize",
 ]
 
 [[package]]
@@ -1775,6 +1798,7 @@ dependencies = [
  "bincode",
  "hex",
  "hkdf",
+ "hmac",
  "rand 0.8.5",
  "serde",
  "sha2",
@@ -1800,6 +1824,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

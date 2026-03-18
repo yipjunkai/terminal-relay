@@ -81,8 +81,15 @@ pub struct SealedFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakeConfirm {
+    /// HMAC-SHA256 over the handshake transcript, proving the sender holds the DH private key.
+    pub mac: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerFrame {
     Handshake(Handshake),
+    HandshakeConfirm(HandshakeConfirm),
     Secure(SealedFrame),
     KeepAlive,
 }
@@ -249,6 +256,13 @@ mod tests {
             fingerprint: "".to_string(),
             tool_name: None,
             timestamp_ms: 0,
+        }));
+    }
+
+    #[test]
+    fn peer_frame_handshake_confirm_roundtrip() {
+        peer_frame_roundtrip(&PeerFrame::HandshakeConfirm(HandshakeConfirm {
+            mac: [0xAB; 32],
         }));
     }
 
