@@ -40,6 +40,11 @@ impl PtySession {
         for arg in args {
             cmd.arg(arg);
         }
+        // Inherit the current working directory so the spawned tool
+        // runs in the same directory the user started terminal-relay from.
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.cwd(cwd);
+        }
 
         let mut child = pair
             .slave

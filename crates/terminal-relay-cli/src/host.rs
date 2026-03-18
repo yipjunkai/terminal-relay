@@ -8,7 +8,7 @@ use clap::Args;
 use crossterm::terminal;
 use qrcode::QrCode;
 use tokio::sync::mpsc;
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 use terminal_relay_core::{
@@ -34,7 +34,7 @@ struct SessionIdentity {
 }
 
 use crate::{
-    ai_tools::{ToolSelector, resolve_tool},
+    ai_tools::resolve_tool,
     pty::PtySession,
     relay_client::RelayConnection,
     state::{SessionRecord, SessionStore},
@@ -44,8 +44,11 @@ use crate::{
 pub struct HostArgs {
     #[arg(long, default_value = crate::constants::DEFAULT_RELAY_URL, env = crate::constants::RELAY_URL_ENV, hide = true)]
     pub relay_url: String,
-    #[arg(long = "tool", value_enum, value_delimiter = ',')]
-    pub tools: Vec<ToolSelector>,
+    /// AI tool to run. Auto-detects if not specified. Accepts known tool names
+    /// (claude, opencode, copilot, gemini, aider) or any command on PATH.
+    #[arg(long)]
+    pub tool: Option<String>,
+    /// Extra arguments to pass to the AI tool.
     #[arg(long = "tool-arg")]
     pub tool_args: Vec<String>,
     #[arg(long)]
@@ -57,39 +60,20 @@ pub struct HostArgs {
 }
 
 pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::Result<()> {
-    let selectors = if args.tools.is_empty() {
-        vec![ToolSelector::Auto]
-    } else {
-        args.tools.clone()
-    };
+    let tool = resolve_tool(args.tool.as_deref(), &args.tool_args)?;
+    let (rows, cols) = initial_size(args.rows, args.cols);
 
-    let mut tasks: Vec<JoinHandle<anyhow::Result<()>>> = Vec::new();
-    for selector in selectors {
-        let tool = resolve_tool(selector, &args.tool_args)?;
-        let relay_url = args.relay_url.clone();
-        let no_qr = args.no_qr;
-        let (rows, cols) = initial_size(args.rows, args.cols);
-        let session_store = store.clone();
-
-        tasks.push(tokio::spawn(async move {
-            run_single_host_session(HostSessionParams {
-                tool_name: tool.name,
-                command: tool.command,
-                args: tool.args,
-                relay_url,
-                rows,
-                cols,
-                no_qr,
-                store: session_store,
-            })
-            .await
-        }));
-    }
-
-    for task in tasks {
-        task.await??;
-    }
-    Ok(())
+    run_single_host_session(HostSessionParams {
+        tool_name: tool.name,
+        command: tool.command,
+        args: tool.args,
+        relay_url: args.relay_url,
+        rows,
+        cols,
+        no_qr: args.no_qr,
+        store,
+    })
+    .await
 }
 
 struct HostSessionParams {
@@ -503,14 +487,44 @@ fn initial_size(rows: Option<u16>, cols: Option<u16>) -> (u16, u16) {
 
 fn print_qr(data: &str) -> anyhow::Result<()> {
     let code = QrCode::new(data.as_bytes()).context("failed generating QR code")?;
-    let rendered = code
-        .render::<char>()
-        .quiet_zone(true)
-        .dark_color('#')
-        .light_color(' ')
-        .module_dimensions(2, 1)
-        .build();
-    println!("\n{rendered}\n");
+    let width = code.width();
+    let modules: Vec<bool> = code
+        .to_colors()
+        .into_iter()
+        .map(|c| c == qrcode::Color::Dark)
+        .collect();
+
+    // Use Unicode half-block rendering: each character encodes two vertical rows.
+    // ▀ = top dark, bottom light    █ = both dark
+    // ▄ = top light, bottom dark    (space) = both light
+    // This halves the QR code height compared to one-char-per-module rendering.
+    let get = |row: i32, col: i32| -> bool {
+        if row < 0 || col < 0 || row >= width as i32 || col >= width as i32 {
+            false
+        } else {
+            modules[row as usize * width + col as usize]
+        }
+    };
+
+    let margin = 1i32;
+    let mut output = String::new();
+    output.push('\n');
+    let mut row = -margin;
+    while row < width as i32 + margin {
+        for col in -margin..width as i32 + margin {
+            let top = get(row, col);
+            let bottom = get(row + 1, col);
+            output.push(match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        output.push('\n');
+        row += 2;
+    }
+    println!("{output}");
     Ok(())
 }
 

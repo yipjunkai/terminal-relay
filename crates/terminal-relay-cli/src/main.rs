@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tracing::info;
 
 use crate::{
     ai_tools::detect_known_tools,
@@ -81,7 +80,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    info!("command finished");
     Ok(())
 }
 

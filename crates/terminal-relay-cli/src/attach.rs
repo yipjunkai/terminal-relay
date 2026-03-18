@@ -48,8 +48,8 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
     let mut resume_token = registered.resume_token.clone();
     let mut chan = ChannelState::new();
 
-    println!("Connected to session {}", pairing.session_id);
-    println!("Local fingerprint: {}", local_fingerprint);
+    eprintln!("Connected to session {}", pairing.session_id);
+    eprintln!("Local fingerprint: {}", local_fingerprint);
 
     if registered.peer_online {
         send_handshake(
@@ -116,7 +116,7 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                         if route.session_id != pairing.session_id {
                             continue;
                         }
-                        handle_route(
+                        let action = handle_route(
                             route,
                             &pairing,
                             local_key.secret,
@@ -125,17 +125,28 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                             &relay_tx,
                             &mut stdout,
                         ).await?;
+                        if matches!(action, RouteAction::Disconnect) {
+                            break;
+                        }
                     }
                     Some(RelayMessage::PeerStatus(status)) => {
-                        if status.role == PeerRole::Host && status.online {
-                            send_handshake(
-                                &pairing.session_id,
-                                &relay_tx,
-                                &local_key.public,
-                                &local_fingerprint,
-                                Some("remote-terminal".to_string()),
-                            )?;
-                            send_resize(&relay_tx, &pairing.session_id, &mut chan)?;
+                        if status.role == PeerRole::Host {
+                            if status.online {
+                                send_handshake(
+                                    &pairing.session_id,
+                                    &relay_tx,
+                                    &local_key.public,
+                                    &local_fingerprint,
+                                    Some("remote-terminal".to_string()),
+                                )?;
+                                send_resize(&relay_tx, &pairing.session_id, &mut chan)?;
+                            } else {
+                                stdout
+                                    .write_all(b"\r\n[disconnected] host went offline\r\n")
+                                    .await?;
+                                stdout.flush().await?;
+                                break;
+                            }
                         }
                     }
                     Some(RelayMessage::Error(err)) => {
@@ -177,7 +188,20 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Drop raw mode so the terminal behaves normally for the prompt.
+    drop(_raw_mode);
+
+    eprintln!("\r\nPress enter to exit...");
+    let mut buf = [0u8; 1];
+    let _ = tokio::io::stdin().read(&mut buf).await;
+
     Ok(())
+}
+
+/// Return value from handle_route indicating whether the session should continue.
+enum RouteAction {
+    Continue,
+    Disconnect,
 }
 
 async fn handle_route(
@@ -188,7 +212,7 @@ async fn handle_route(
     chan: &mut ChannelState,
     relay_tx: &mpsc::UnboundedSender<RelayMessage>,
     stdout: &mut tokio::io::Stdout,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RouteAction> {
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
         PeerFrame::Handshake(handshake) => {
@@ -197,7 +221,7 @@ async fn handle_route(
             let age = now.saturating_sub(handshake.timestamp_ms);
             if age > HANDSHAKE_MAX_AGE_MS {
                 warn!(age_ms = age, "rejecting stale handshake");
-                return Ok(());
+                return Ok(RouteAction::Continue);
             }
 
             if let Some(expected) = &pairing.expected_fingerprint
@@ -245,25 +269,36 @@ async fn handle_route(
         PeerFrame::HandshakeConfirm(confirm) => {
             let Some(expected) = &chan.expected_peer_mac else {
                 warn!("received HandshakeConfirm without pending handshake");
-                return Ok(());
+                return Ok(RouteAction::Continue);
             };
 
             if confirm.mac != *expected {
                 warn!("handshake confirmation MAC mismatch — tearing down channel");
                 chan.reset();
-                return Ok(());
+                return Ok(RouteAction::Continue);
             }
 
             info!("handshake confirmed, channel trusted");
             chan.confirmed = true;
             chan.expected_peer_mac = None;
+
+            // Clear the screen so connection info doesn't bleed into the terminal output.
+            stdout.write_all(b"\x1b[2J\x1b[H").await?;
+            stdout.flush().await?;
+
+            // Send our terminal size so the host PTY renders at the correct dimensions.
+            let (cols, rows) = terminal::size().unwrap_or((120, 40));
+            if let Some(ch) = chan.channel.as_mut() {
+                let sealed = ch.seal(&SecureMessage::Resize { cols, rows })?;
+                send_peer_frame(relay_tx, &pairing.session_id, PeerFrame::Secure(sealed))?;
+            }
         }
         PeerFrame::Secure(sealed) => {
             if !chan.confirmed {
-                return Ok(());
+                return Ok(RouteAction::Continue);
             }
             let Some(channel) = chan.channel.as_mut() else {
-                return Ok(());
+                return Ok(RouteAction::Continue);
             };
             match channel.open(&sealed)? {
                 SecureMessage::PtyOutput(bytes) => {
@@ -297,6 +332,7 @@ async fn handle_route(
                         )
                         .await?;
                     stdout.flush().await?;
+                    return Ok(RouteAction::Disconnect);
                 }
                 SecureMessage::Heartbeat
                 | SecureMessage::Resize { .. }
@@ -309,7 +345,7 @@ async fn handle_route(
         }
         PeerFrame::KeepAlive => {}
     }
-    Ok(())
+    Ok(RouteAction::Continue)
 }
 
 fn send_resize(
