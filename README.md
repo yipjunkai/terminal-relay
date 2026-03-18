@@ -41,20 +41,25 @@ terminal-relay attach --pairing-uri "termrelay://pair?..."
 ## Commands
 
 ```bash
-terminal-relay start              # Start a session with auto-detected AI tool
-terminal-relay start --tool aider # Start with a specific tool
-terminal-relay attach             # Attach to a session via pairing URI
-terminal-relay detect-tools       # List available AI tools on PATH
-terminal-relay sessions           # List active/persisted sessions
+terminal-relay start                      # Start with auto-detected AI tool
+terminal-relay start --tool opencode      # Start with a specific known tool
+terminal-relay start --tool my-custom-ai  # Start with any command on PATH
+terminal-relay attach --pairing-uri "..." # Attach to a session
+terminal-relay detect-tools               # List available AI tools on PATH
+terminal-relay sessions                   # List active/persisted sessions
+terminal-relay --version                  # Show version
 ```
 
 ## Supported AI tools
 
+Auto-detected in order of priority:
+
 - **Claude Code** (Anthropic)
+- **OpenCode** (open source)
 - **GitHub Copilot CLI** (Microsoft)
 - **Gemini CLI** (Google)
 - **Aider** (open source)
-- Any terminal-based AI tool (via `--tool-arg`)
+- Any terminal-based AI tool (via `--tool <command>`)
 
 ## What this repo includes
 

@@ -26,6 +26,13 @@ Items are roughly ordered by priority within each phase.
 - [x] Add forward-compatible extensibility: `decode_secure_message` returns `Unknown(Vec<u8>)` instead of erroring on unrecognized variants. All handlers silently ignore `Unknown`.
 - [x] Implement version range negotiation: client sends `protocol_version` (max) and `protocol_version_min`, server selects highest mutually supported version and returns `negotiated_protocol_version`. Bumped to protocol v2, supporting v1-v2.
 - [x] Send `SessionEnded { exit_code }` to the attached client when the PTY child exits. Attach side displays the exit code.
+- [x] Switch wire format from bincode to MessagePack (`rmp-serde`) for cross-platform client compatibility (Swift, Kotlin, JS).
+- [x] Add `opencode` to tool detection list.
+- [x] Add `--command` flag for running arbitrary commands (e.g. `--command opencode`).
+- [x] Fix PTY to inherit current working directory instead of defaulting to `$HOME`.
+- [x] Compact QR code rendering using Unicode half-block characters.
+- [x] Attach client cleanly exits on `SessionEnded` or host going offline, with "Press enter to exit" prompt.
+- [x] Clear attach screen on handshake confirm and send immediate resize so host PTY renders at correct dimensions.
 
 ## Phase 4: Relay deployment (pre-native-app)
 
