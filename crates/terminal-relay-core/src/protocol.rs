@@ -156,7 +156,7 @@ pub enum SecureMessage {
 }
 
 pub fn encode_relay(message: &RelayMessage) -> CoreResult<Vec<u8>> {
-    rmp_serde::to_vec(message).map_err(|err| CoreError::Serialization(err.to_string()))
+    rmp_serde::to_vec_named(message).map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
 pub fn decode_relay(bytes: &[u8]) -> CoreResult<RelayMessage> {
@@ -164,7 +164,7 @@ pub fn decode_relay(bytes: &[u8]) -> CoreResult<RelayMessage> {
 }
 
 pub fn encode_peer_frame(frame: &PeerFrame) -> CoreResult<Vec<u8>> {
-    rmp_serde::to_vec(frame).map_err(|err| CoreError::Serialization(err.to_string()))
+    rmp_serde::to_vec_named(frame).map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
 pub fn decode_peer_frame(bytes: &[u8]) -> CoreResult<PeerFrame> {
@@ -172,7 +172,7 @@ pub fn decode_peer_frame(bytes: &[u8]) -> CoreResult<PeerFrame> {
 }
 
 pub fn encode_secure_message(message: &SecureMessage) -> CoreResult<Vec<u8>> {
-    rmp_serde::to_vec(message).map_err(|err| CoreError::Serialization(err.to_string()))
+    rmp_serde::to_vec_named(message).map_err(|err| CoreError::Serialization(err.to_string()))
 }
 
 /// Decode a `SecureMessage`, falling back to `SecureMessage::Unknown` for unrecognized variants.

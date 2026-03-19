@@ -202,9 +202,7 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
     {
         let mut stdout = tokio::io::stdout();
         stdout
-            .write_all(
-                b"\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[0m\x1b[2J\x1b[H",
-            )
+            .write_all(b"\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[0m\x1b[2J\x1b[H")
             .await?;
         stdout.flush().await?;
     }
