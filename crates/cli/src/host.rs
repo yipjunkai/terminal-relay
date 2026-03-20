@@ -70,11 +70,9 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
     // Resolve API key: CLI arg > env var > config file (hosted builds only).
     #[cfg(feature = "hosted")]
     let api_key = {
-        let key = args.api_key.or_else(|| {
-            crate::config::Config::load()
-                .ok()
-                .and_then(|c| c.api_key)
-        });
+        let key = args
+            .api_key
+            .or_else(|| crate::config::Config::load().ok().and_then(|c| c.api_key));
         // Warn if connecting to the production relay without an API key.
         if key.is_none() && args.relay_url == crate::constants::DEFAULT_RELAY_URL {
             eprintln!("Warning: No API key found. The hosted relay requires authentication.");
@@ -130,8 +128,14 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     let local_key = generate_key_pair();
     let local_fingerprint = fingerprint(&local_key.public);
 
-    let (mut relay, registered) =
-        connect_host(&relay_url, &session_id, &pairing_code, None, api_key.as_deref()).await?;
+    let (mut relay, registered) = connect_host(
+        &relay_url,
+        &session_id,
+        &pairing_code,
+        None,
+        api_key.as_deref(),
+    )
+    .await?;
     let mut relay_tx = relay.sender();
     let mut resume_token = registered.resume_token.clone();
 
@@ -413,11 +417,10 @@ fn handle_route(
                 }
             }
 
-            let notice =
-                SecureMessage::Notification(protocol::protocol::PushNotification {
-                    title: format!("Connected to {}", id.tool_name),
-                    body: "Session encryption established".to_string(),
-                });
+            let notice = SecureMessage::Notification(protocol::protocol::PushNotification {
+                title: format!("Connected to {}", id.tool_name),
+                body: "Session encryption established".to_string(),
+            });
             if let Some(ch) = chan.channel.as_mut() {
                 let sealed = ch.seal(&notice)?;
                 send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
@@ -464,10 +467,7 @@ async fn connect_host(
     pairing_code: &str,
     resume_token: Option<String>,
     api_key: Option<&str>,
-) -> anyhow::Result<(
-    RelayConnection,
-    protocol::protocol::RegisterResponse,
-)> {
+) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
     RelayConnection::connect(
         relay_url,
         RegisterRequest {
@@ -493,10 +493,7 @@ async fn reconnect_host(
     pairing_code: &str,
     resume_token: &str,
     api_key: Option<&str>,
-) -> anyhow::Result<(
-    RelayConnection,
-    protocol::protocol::RegisterResponse,
-)> {
+) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
         tokio::select! {

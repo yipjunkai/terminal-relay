@@ -425,10 +425,7 @@ fn resolve_pairing(args: &AttachArgs) -> anyhow::Result<PairingUri> {
 async fn connect_client(
     pairing: &PairingUri,
     resume_token: Option<String>,
-) -> anyhow::Result<(
-    RelayConnection,
-    protocol::protocol::RegisterResponse,
-)> {
+) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
     RelayConnection::connect(
         &pairing.relay_url,
         RegisterRequest {
@@ -451,10 +448,7 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 async fn reconnect_client(
     pairing: &PairingUri,
     resume_token: &str,
-) -> anyhow::Result<(
-    RelayConnection,
-    protocol::protocol::RegisterResponse,
-)> {
+) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
         tokio::select! {

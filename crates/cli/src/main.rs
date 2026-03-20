@@ -81,7 +81,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Start(args) => run_host_sessions(args, store).await?,
         Command::Attach(args) => run_attach(args).await?,
         #[cfg(feature = "hosted")]
-        Command::Auth { email, api_key, invite_code } => {
+        Command::Auth {
+            email,
+            api_key,
+            invite_code,
+        } => {
             account::auth(email.as_deref(), api_key.as_deref(), invite_code.as_deref()).await?;
         }
         #[cfg(feature = "hosted")]
@@ -93,11 +97,7 @@ async fn main() -> anyhow::Result<()> {
             let config = config::Config::load()?;
             match config.api_key {
                 Some(key) => {
-                    let prefix = if key.len() > 16 {
-                        &key[..16]
-                    } else {
-                        &key
-                    };
+                    let prefix = if key.len() > 16 { &key[..16] } else { &key };
                     println!("Authenticated");
                     println!("  API key:     {prefix}...");
                     println!(

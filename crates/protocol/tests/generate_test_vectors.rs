@@ -1,6 +1,6 @@
 use protocol::{
     crypto::{compute_handshake_mac, derive_session_keys, fingerprint, verify_handshake_mac},
-    pairing::{build_pairing_uri, parse_pairing_uri, PairingUri},
+    pairing::{PairingUri, build_pairing_uri, parse_pairing_uri},
     protocol::*,
 };
 /// Generates deterministic test vectors for cross-platform compatibility testing.
@@ -8,7 +8,7 @@ use protocol::{
 ///
 /// The output JSON can be saved and used by Dart, Swift, Kotlin tests to verify
 /// wire-compatible encoding/decoding and identical crypto outputs.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 // ---------------------------------------------------------------------------

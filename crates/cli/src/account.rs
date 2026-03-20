@@ -70,7 +70,11 @@ fn resolve_control_api_url(config: &Config) -> String {
 ///
 /// Default (no flags): device authorization flow — opens browser, user enters code.
 /// Fallbacks: --email + --invite-code for direct registration, --api-key for login.
-pub async fn auth(email: Option<&str>, api_key: Option<&str>, invite_code: Option<&str>) -> anyhow::Result<()> {
+pub async fn auth(
+    email: Option<&str>,
+    api_key: Option<&str>,
+    invite_code: Option<&str>,
+) -> anyhow::Result<()> {
     match (email, api_key) {
         (_, Some(key)) => login_with_key(key).await,
         (Some(email), None) => {
@@ -119,7 +123,10 @@ async fn device_auth_flow() -> anyhow::Result<()> {
         anyhow::bail!("failed to request device code ({status}): {text}");
     }
 
-    let device: DeviceCodeResponse = resp.json().await.context("failed to parse device code response")?;
+    let device: DeviceCodeResponse = resp
+        .json()
+        .await
+        .context("failed to parse device code response")?;
 
     // Step 2: Display instructions and open browser.
     println!();
@@ -149,7 +156,10 @@ async fn device_auth_flow() -> anyhow::Result<()> {
         }
 
         // Show spinner
-        print!("\r  {} Waiting for activation...", spinner[tick % spinner.len()]);
+        print!(
+            "\r  {} Waiting for activation...",
+            spinner[tick % spinner.len()]
+        );
         io::stdout().flush().ok();
         tick += 1;
 
@@ -174,7 +184,9 @@ async fn device_auth_flow() -> anyhow::Result<()> {
             let status = resp.status();
             if status.as_u16() == 400 {
                 print!("\r");
-                anyhow::bail!("device code expired or not found — run `terminal-relay auth` to try again");
+                anyhow::bail!(
+                    "device code expired or not found — run `terminal-relay auth` to try again"
+                );
             }
             tracing::debug!("poll returned {status}");
             continue;
@@ -192,7 +204,9 @@ async fn device_auth_flow() -> anyhow::Result<()> {
             // Clear the spinner line.
             print!("\r                                      \r");
 
-            let api_key = poll.api_key.context("server returned complete but no API key")?;
+            let api_key = poll
+                .api_key
+                .context("server returned complete but no API key")?;
             let email = poll.email.unwrap_or_else(|| "unknown".to_string());
 
             let mut config = Config::load()?;

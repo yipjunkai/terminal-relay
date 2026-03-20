@@ -569,10 +569,8 @@ pub async fn ws_handler(
                     ip = %addr.ip(),
                     "authenticated WebSocket upgrade"
                 );
-                ws.on_upgrade(move |socket| {
-                    handle_socket(socket, state, addr.ip(), Some(payload))
-                })
-                .into_response()
+                ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip(), Some(payload)))
+                    .into_response()
             }
             None => {
                 warn!(ip = %addr.ip(), "WebSocket upgrade rejected: invalid or revoked API key");
@@ -631,7 +629,8 @@ async fn handle_socket(
         let session_id = register_request.session_id.clone();
         let user_id = payload.uid.clone();
         tokio::spawn(async move {
-            auth.report_session_started(&session_id, &user_id, None).await;
+            auth.report_session_started(&session_id, &user_id, None)
+                .await;
         });
     }
 
@@ -645,15 +644,14 @@ async fn handle_socket(
     };
 
     // Track per-user session count (host role only, since hosts create sessions)
-    if register_request.role == PeerRole::Host {
-        if let Some(ref payload) = api_key_payload {
+    if register_request.role == PeerRole::Host
+        && let Some(ref payload) = api_key_payload {
             state.track_user(&payload.uid);
             // Store user_id on the session slot for cleanup
             if let Some(mut session) = state.sessions.get_mut(&register_request.session_id) {
                 session.host_user_id = Some(payload.uid.clone());
             }
         }
-    }
 
     let registered_message = RelayMessage::Registered(register_response.clone());
     if send_wire(&mut sink, &registered_message).await.is_err() {
@@ -746,11 +744,10 @@ async fn handle_socket(
     state.notify_peer_status(&register_request.session_id, register_request.role, false);
 
     // Untrack per-user session count
-    if register_request.role == PeerRole::Host {
-        if let Some(ref payload) = api_key_payload {
+    if register_request.role == PeerRole::Host
+        && let Some(ref payload) = api_key_payload {
             state.untrack_user(&payload.uid);
         }
-    }
 
     let duration_ms = connected_at.elapsed().as_millis() as u64;
     info!(
