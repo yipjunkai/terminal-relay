@@ -20,6 +20,12 @@ struct Args {
     min_version: String,
     #[arg(long, default_value_t = 24 * 60 * 60)]
     session_ttl_secs: u64,
+    /// Maximum number of concurrent sessions (0 = unlimited).
+    #[arg(long, default_value_t = 0, env = "RELAY_MAX_SESSIONS")]
+    max_sessions: usize,
+    /// Maximum concurrent sessions per IP address (0 = unlimited).
+    #[arg(long, default_value_t = 0, env = "RELAY_MAX_SESSIONS_PER_IP")]
+    max_sessions_per_ip: usize,
 }
 
 #[tokio::main]
@@ -35,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(RelayState::new(
         args.min_version.clone(),
         Duration::from_secs(args.session_ttl_secs),
+        args.max_sessions,
+        args.max_sessions_per_ip,
     ));
 
     let cleanup_state = Arc::clone(&state);
@@ -57,10 +65,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed binding to {}", args.bind))?;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("relay server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("relay server error")?;
 
     info!("shutting down");
     cleanup_handle.abort();
