@@ -1,5 +1,8 @@
+use std::io::{self, Write};
+
 use anyhow::Context;
 use serde::Deserialize;
+use tokio::time::{Duration, sleep};
 
 use crate::config::Config;
 use crate::constants::{CONTROL_API_URL_ENV, DEFAULT_CONTROL_API_URL};
@@ -21,6 +24,26 @@ struct LoginResponse {
     #[allow(dead_code)]
     access_token: String,
     user: UserInfo,
+}
+
+/// Response from POST /auth/device/code.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    expires_in: u64,
+    interval: u64,
+}
+
+/// Response from POST /auth/device/poll.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevicePollResponse {
+    status: String,
+    api_key: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -45,21 +68,21 @@ fn resolve_control_api_url(config: &Config) -> String {
 
 /// Authenticate with the control API.
 ///
-/// Current implementation: email-based registration or API key login.
-/// Planned: device authorization flow (open browser, enter code, poll for completion).
-pub async fn auth(email: Option<&str>, api_key: Option<&str>) -> anyhow::Result<()> {
+/// Default (no flags): device authorization flow — opens browser, user enters code.
+/// Fallbacks: --email + --invite-code for direct registration, --api-key for login.
+pub async fn auth(email: Option<&str>, api_key: Option<&str>, invite_code: Option<&str>) -> anyhow::Result<()> {
     match (email, api_key) {
         (_, Some(key)) => login_with_key(key).await,
-        (Some(email), None) => register_with_email(email).await,
-        (None, None) => {
-            // TODO: Replace with device authorization flow.
-            // For now, prompt the user to provide email or API key.
-            println!("Authenticate with Terminal Relay:\n");
-            println!("  New user:      terminal-relay auth --email you@example.com");
-            println!("  Existing key:  terminal-relay auth --api-key tr_...");
-            println!("\nIn a future version, this will open your browser for login.");
-            Ok(())
+        (Some(email), None) => {
+            let code = invite_code.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "An invite code is required for registration.\n\
+                     Usage: terminal-relay auth --email you@example.com --invite-code CODE"
+                )
+            })?;
+            register_with_email(email, code).await
         }
+        (None, None) => device_auth_flow().await,
     }
 }
 
@@ -76,12 +99,129 @@ pub fn logout() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn register_with_email(email: &str) -> anyhow::Result<()> {
+// ── Device Authorization Flow ────────────────────────────────────────
+
+async fn device_auth_flow() -> anyhow::Result<()> {
+    let config = Config::load()?;
+    let base_url = resolve_control_api_url(&config);
+    let client = reqwest::Client::new();
+
+    // Step 1: Request a device code.
+    let resp = client
+        .post(format!("{base_url}/auth/device/code"))
+        .send()
+        .await
+        .context("failed to reach control API")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("failed to request device code ({status}): {text}");
+    }
+
+    let device: DeviceCodeResponse = resp.json().await.context("failed to parse device code response")?;
+
+    // Step 2: Display instructions and open browser.
+    println!();
+    println!("  Open this URL in your browser:");
+    println!();
+    println!("    {}", device.verification_uri);
+    println!();
+    println!("  Then enter this code:");
+    println!();
+    println!("    {}", device.user_code);
+    println!();
+
+    // Try to open the browser (non-fatal if it fails).
+    if let Err(e) = open::that(&device.verification_uri) {
+        tracing::debug!("could not open browser: {e}");
+    }
+
+    // Step 3: Poll until activated or expired.
+    let poll_interval = Duration::from_secs(device.interval.max(2));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
+    let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let mut tick = 0usize;
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("device code expired — run `terminal-relay auth` to try again");
+        }
+
+        // Show spinner
+        print!("\r  {} Waiting for activation...", spinner[tick % spinner.len()]);
+        io::stdout().flush().ok();
+        tick += 1;
+
+        sleep(poll_interval).await;
+
+        let resp = client
+            .post(format!("{base_url}/auth/device/poll"))
+            .json(&serde_json::json!({ "deviceCode": device.device_code }))
+            .send()
+            .await;
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("poll request failed: {e}");
+                continue; // Retry on transient errors.
+            }
+        };
+
+        if !resp.status().is_success() {
+            // Device code may have expired on the server side.
+            let status = resp.status();
+            if status.as_u16() == 400 {
+                print!("\r");
+                anyhow::bail!("device code expired or not found — run `terminal-relay auth` to try again");
+            }
+            tracing::debug!("poll returned {status}");
+            continue;
+        }
+
+        let poll: DevicePollResponse = match resp.json().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("failed to parse poll response: {e}");
+                continue;
+            }
+        };
+
+        if poll.status == "complete" {
+            // Clear the spinner line.
+            print!("\r                                      \r");
+
+            let api_key = poll.api_key.context("server returned complete but no API key")?;
+            let email = poll.email.unwrap_or_else(|| "unknown".to_string());
+
+            let mut config = Config::load()?;
+            config.api_key = Some(api_key.clone());
+            config.save()?;
+
+            println!("  Authenticated as {email}");
+            println!("  API key saved to ~/.terminal-relay/config.toml");
+            println!();
+            println!("  Your API key (save this — it won't be shown again):");
+            println!("    {api_key}");
+            println!();
+            println!("  Get started:");
+            println!("    terminal-relay start");
+            return Ok(());
+        }
+
+        // status == "pending" — keep polling.
+    }
+}
+
+// ── Direct registration / login (fallback) ───────────────────────────
+
+async fn register_with_email(email: &str, invite_code: &str) -> anyhow::Result<()> {
     let config = Config::load()?;
     let base_url = resolve_control_api_url(&config);
 
     let client = reqwest::Client::new();
-    let body = serde_json::json!({ "email": email });
+    let body = serde_json::json!({ "email": email, "inviteCode": invite_code });
 
     let resp = client
         .post(format!("{base_url}/auth/register"))
