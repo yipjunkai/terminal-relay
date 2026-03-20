@@ -150,13 +150,74 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 - [x] Enrich the `/healthz` endpoint to return structured JSON with session count and server version. _(Done in Phase 2.)_
 - [ ] Add multi-region relay support with geo-routing so clients connect to the nearest relay for lower latency.
 
-### Control API gateway (planned)
+### Control API gateway (in progress)
 
-Authentication and billing belong in the control API (`control/`), not in the open-source relay. The relay stays a simple dumb pipe; the control API sits in front of the hosted relay as a gateway.
+Authentication and billing belong in the control API (`control/`), not in the open-source relay. The relay stays a simple dumb pipe; the control API handles auth, metering, and billing.
 
-- [ ] Add WebSocket proxy endpoint in control API that validates API keys before upgrading and forwarding to the relay. CLI and mobile app include `api_key` in the pairing URI; the proxy strips it before forwarding.
-- [ ] Add API key management endpoints: `POST /api/keys` (create), `GET /api/keys` (list), `DELETE /api/keys/:id` (revoke). Keys tied to `User` model via Prisma.
-- [ ] Add usage metering in the proxy: track bytes relayed, session duration, and connection count per user. Write to the existing `Usage` table.
+#### Completed
+
+- [x] Add user registration endpoint (`POST /auth/register` with email). Returns JWT + first API key.
+- [x] Add `ApiKey` Prisma model with multi-key support: SHA-256 hashed keys, `tr_` prefix, named keys, expiry, revocation, `lastUsedAt` tracking. Replaced single `User.apiKey` field.
+- [x] Add API key management endpoints: `POST /api/keys` (create), `GET /api/keys` (list), `DELETE /api/keys/:id` (revoke). Keys tied to `User` model via Prisma. JWT-protected.
+- [x] Fix Dockerfile to use pnpm (was incorrectly using npm/package-lock.json).
+- [x] Remove dead `@nestjs/platform-express` dependency.
+- [x] Implement signed API key generation in the control API: encode `{ user_id, key_id, tier, created_at }` + HMAC-SHA256 into the `tr_` prefixed key. Store the key hash in Prisma for revocation tracking. Constant-time signature verification.
+- [x] Add HMAC key verification to the Rust relay on WebSocket upgrade. Shared secret via `HMAC_SECRET` env var. Dual-secret support for rotation via `HMAC_SECRET_PREVIOUS`. Returns 401/403 before upgrade if key is missing/invalid. Gracefully degrades to open relay when `HMAC_SECRET` is not set.
+- [x] Add revocation list sync: relay fetches `GET /internal/revoked-keys` from control API every 60s, caches `key_id` set in memory. Control API endpoint authenticated with `X-Internal-Secret` header.
+- [x] Add relay session lifecycle callbacks: `POST /internal/session-started` and `POST /internal/session-ended { session_id, user_id, bytes_up, bytes_down, duration_ms }` to the control API for usage metering. Relay tracks bytes up/down per connection and reports on disconnect.
+- [x] Add WebSocket proxy endpoint as interim solution (to be removed once signed key flow is validated end-to-end).
+
+#### Signed API key architecture
+
+API keys are **self-validating signed tokens** so the relay can verify them locally with zero network calls.
+
+**Key format:** `tr_<base64url(payload_json + "." + HMAC-SHA256(payload_json, HMAC_SECRET))>` where payload = `{ uid, kid, tier, iat }`. The relay shares the same `HMAC_SECRET` with the control API and can verify + decode any key in microseconds with no database or HTTP calls.
+
+**Connection flow:**
+1. CLI/mobile connects directly to the relay: `wss://relay.../ws?api_key=tr_...`.
+2. Relay decodes the key, verifies the HMAC signature, extracts `user_id` and `tier`.
+3. Relay checks the in-memory revocation set (synced periodically from the control API).
+4. All traffic is Client ⟷ Relay directly. Control API is never in the data path.
+
+**Revocation:** Relay periodically fetches `GET /internal/revoked-keys` from the control API (every 60s) and caches the set in memory. Revocation propagation delay is acceptable — the user revoking the key is the same user who had access.
+
+**Usage reporting:** Relay reports session stats to the control API on disconnect via `POST /internal/session-ended`. Periodic heartbeats allow the control API to reconcile stale sessions from relay crashes.
+
+**Advantages over proxy/ticket:** zero per-frame overhead, zero per-connection HTTP round-trips, control API downtime doesn't block new or existing sessions, scales to multi-region relays with a single control API.
+
+**Security notes:** The HMAC secret must be kept secure on both the control API and relay — compromise of the secret allows forging arbitrary API keys. Key contents (uid, tier) are not encrypted, only signed — they are visible to anyone who base64-decodes the key, but cannot be tampered with. This is acceptable since API keys are already bearer tokens.
+
+#### Remaining
+
+- [ ] Add periodic relay heartbeat (`POST /internal/heartbeat { active_sessions }`) so control API can detect and reconcile stale sessions from relay crashes.
+- [ ] Remove the WebSocket proxy from the control API once signed key flow is validated end-to-end.
+- [ ] Add `terminal-relay register` / `terminal-relay login` CLI commands: hit control API, store signed API key in `~/.terminal-relay/config.toml`.
+- [ ] Update pairing URI to include `api_key` so mobile app connects through the same authenticated path.
+- [ ] Add tests for signed key generation/verification (control API) and HMAC verification/revocation (relay auth.rs).
+#### Key lifecycle and secret rotation (planned)
+
+Two-layer rotation strategy inspired by Infisical's active/inactive/revoked model. User-level key rotation and infra-level HMAC secret rotation work together — regular key rotation at the user level ensures all active keys are re-signed before an old HMAC secret is dropped.
+
+**User API key lifecycle (active → inactive → revoked):**
+
+API keys have a `status` field tracking their lifecycle. The control API marks keys as inactive based on age policy (e.g., 90 days). Clients detect inactive status and rotate automatically. This gives users a graceful deprecation window instead of hard cutoffs.
+
+- [ ] Add `status` field to `ApiKey` model (`active`, `inactive`, `revoked`). Inactive keys still pass validation but signal the client to rotate.
+- [ ] Relay signals key status on WebSocket upgrade (e.g., custom close code or initial message) when the key's `created_at` exceeds the inactive threshold. CLI detects this and requests a fresh key from `POST /api/keys/rotate` in the background.
+- [ ] Add `POST /api/keys/rotate` endpoint: creates a new key for the user, marks the old key as inactive, returns the new raw key. CLI stores it automatically in `~/.terminal-relay/config.toml`.
+- [ ] Add a scheduled job in the control API to transition keys: mark keys older than N days as inactive, revoke keys that have been inactive for M days.
+- [ ] Handle QR code / pairing URI gracefully: keys in the inactive window still work for mobile connections. The mobile app does not need to rotate — the session is short-lived.
+
+**HMAC signing secret rotation (infra level):**
+
+The HMAC secret used to sign API keys needs periodic rotation. The relay supports dual verification during a transition window. Because user-level key rotation re-signs keys with the current secret on a regular cadence, all active keys naturally migrate to the new secret before the old one is dropped.
+
+- [ ] Support multiple HMAC secrets on the relay (`HMAC_SECRET_CURRENT` + `HMAC_SECRET_PREVIOUS`). On verification, try current first, fall back to previous.
+- [ ] Rotation procedure: generate new secret → deploy to relays as `HMAC_SECRET_CURRENT` (old secret moves to `HMAC_SECRET_PREVIOUS`) → new keys are signed with the new secret → after grace period (e.g., 30 days, long enough for user-level key rotation to re-sign all active keys), drop `HMAC_SECRET_PREVIOUS`.
+- [ ] Add `signing_secret_version` to the signed key payload so the relay knows which secret to verify with, avoiding trial-and-error.
+
+#### Remaining
+
 - [ ] Add rate limiting per API key (sessions/hour, bytes/day) with configurable tiers. Free tier gets stricter limits.
 - [ ] Add anonymous access mode: no API key required but subject to aggressive per-IP limits (e.g. 2 sessions, 1 hour TTL). Encourages sign-up without blocking first-time users.
 - [ ] Add billing integration: enforce plan limits (session count, concurrent sessions, bandwidth) and return clear errors when exceeded.

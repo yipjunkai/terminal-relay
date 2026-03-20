@@ -1,3 +1,4 @@
+mod auth;
 mod relay;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -8,6 +9,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use crate::auth::AuthState;
 use crate::relay::{RelayState, health_handler, ws_handler};
 
 #[derive(Debug, Parser)]
@@ -26,6 +28,18 @@ struct Args {
     /// Maximum concurrent sessions per IP address (0 = unlimited).
     #[arg(long, default_value_t = 0, env = "RELAY_MAX_SESSIONS_PER_IP")]
     max_sessions_per_ip: usize,
+    /// HMAC secret for verifying signed API keys. If empty, auth is disabled (open relay).
+    #[arg(long, default_value = "", env = "HMAC_SECRET")]
+    hmac_secret: String,
+    /// Previous HMAC secret for key rotation. Optional.
+    #[arg(long, default_value = "", env = "HMAC_SECRET_PREVIOUS")]
+    hmac_secret_previous: String,
+    /// Control API base URL for revocation sync and session reporting (e.g. https://api.terminal-relay.dev).
+    #[arg(long, env = "CONTROL_API_URL")]
+    control_api_url: Option<String>,
+    /// Shared secret for authenticating with the control API internal endpoints.
+    #[arg(long, default_value = "", env = "INTERNAL_SECRET")]
+    internal_secret: String,
 }
 
 #[tokio::main]
@@ -38,17 +52,45 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    let auth = Arc::new(AuthState::new(
+        args.hmac_secret.clone(),
+        if args.hmac_secret_previous.is_empty() {
+            None
+        } else {
+            Some(args.hmac_secret_previous.clone())
+        },
+        args.control_api_url.clone(),
+        if args.internal_secret.is_empty() {
+            None
+        } else {
+            Some(args.internal_secret.clone())
+        },
+    ));
+
     let state = Arc::new(RelayState::new(
         args.min_version.clone(),
         Duration::from_secs(args.session_ttl_secs),
         args.max_sessions,
         args.max_sessions_per_ip,
+        Arc::clone(&auth),
     ));
 
     let cleanup_state = Arc::clone(&state);
     let cleanup_handle = tokio::spawn(async move {
         cleanup_state.cleanup_loop().await;
     });
+
+    // Start revocation sync loop if auth is enabled
+    let revocation_handle = if auth.is_enabled() {
+        let auth_clone = Arc::clone(&auth);
+        Some(tokio::spawn(async move {
+            auth_clone.revocation_sync_loop().await;
+        }))
+    } else {
+        info!("HMAC_SECRET not set, running as open relay (no auth)");
+        None
+    };
 
     let app = Router::new()
         .route("/healthz", get(health_handler))
@@ -59,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
         bind = %args.bind,
         min_version = %args.min_version,
         version = env!("CARGO_PKG_VERSION"),
+        auth_enabled = auth.is_enabled(),
         "relay server ready"
     );
     let listener = TcpListener::bind(args.bind)
@@ -75,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
     cleanup_handle.abort();
+    if let Some(handle) = revocation_handle {
+        handle.abort();
+    }
     Ok(())
 }
 

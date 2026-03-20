@@ -2,7 +2,8 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use axum::{
     Json,
-    extract::{ConnectInfo, State, WebSocketUpgrade, ws::Message},
+    extract::{ConnectInfo, Query, State, WebSocketUpgrade, ws::Message},
+    http::StatusCode,
     response::IntoResponse,
 };
 use dashmap::DashMap;
@@ -16,6 +17,8 @@ use protocol::protocol::{
     PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerRole, PeerStatus, RegisterRequest,
     RegisterResponse, RelayError, RelayMessage, RelayRoute, decode_relay, encode_relay,
 };
+
+use crate::auth::{ApiKeyPayload, AuthState};
 
 #[derive(Clone)]
 struct PeerSlot {
@@ -84,9 +87,11 @@ pub struct RelayState {
     min_version: Version,
     session_ttl: Duration,
     /// Maximum total concurrent sessions (0 = unlimited).
-    max_sessions: usize,
+    pub max_sessions: usize,
     /// Maximum concurrent sessions per IP (0 = unlimited).
-    max_sessions_per_ip: usize,
+    pub max_sessions_per_ip: usize,
+    /// Auth state for API key verification and control API communication.
+    auth: Arc<AuthState>,
 }
 
 impl RelayState {
@@ -95,6 +100,7 @@ impl RelayState {
         session_ttl: Duration,
         max_sessions: usize,
         max_sessions_per_ip: usize,
+        auth: Arc<AuthState>,
     ) -> Self {
         let parsed_version = Version::parse(&min_version).unwrap_or_else(|_| Version::new(0, 1, 0));
         Self {
@@ -104,6 +110,7 @@ impl RelayState {
             session_ttl,
             max_sessions,
             max_sessions_per_ip,
+            auth,
         }
     }
 
@@ -459,15 +466,55 @@ pub async fn health_handler(State(state): State<Arc<RelayState>>) -> Json<serde_
     }))
 }
 
+#[derive(serde::Deserialize)]
+pub struct WsQueryParams {
+    api_key: Option<String>,
+}
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    Query(params): Query<WsQueryParams>,
     State(state): State<Arc<RelayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip()))
+    // If auth is enabled, verify the API key before upgrading the WebSocket
+    if state.auth.is_enabled() {
+        let Some(api_key) = params.api_key else {
+            return (StatusCode::UNAUTHORIZED, "missing api_key query parameter").into_response();
+        };
+
+        match state.auth.verify_api_key(&api_key).await {
+            Some(payload) => {
+                info!(
+                    user_id = %payload.uid,
+                    key_id = %payload.kid,
+                    tier = %payload.tier,
+                    ip = %addr.ip(),
+                    "authenticated WebSocket upgrade"
+                );
+                ws.on_upgrade(move |socket| {
+                    handle_socket(socket, state, addr.ip(), Some(payload))
+                })
+                .into_response()
+            }
+            None => {
+                warn!(ip = %addr.ip(), "WebSocket upgrade rejected: invalid or revoked API key");
+                (StatusCode::FORBIDDEN, "invalid or revoked API key").into_response()
+            }
+        }
+    } else {
+        // Open relay mode — no auth required
+        ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip(), None))
+            .into_response()
+    }
 }
 
-async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelayState>, ip: IpAddr) {
+async fn handle_socket(
+    socket: axum::extract::ws::WebSocket,
+    state: Arc<RelayState>,
+    ip: IpAddr,
+    api_key_payload: Option<ApiKeyPayload>,
+) {
     let (mut sink, mut stream) = socket.split();
 
     let Some(first_message) = stream.next().await else {
@@ -495,6 +542,21 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelaySta
             return;
         }
     };
+
+    // Track bytes for usage reporting
+    let mut bytes_up: u64 = 0;
+    let mut bytes_down: u64 = 0;
+    let connected_at = Instant::now();
+
+    // Report session start to control API (fire-and-forget)
+    if let Some(ref payload) = api_key_payload {
+        let auth = Arc::clone(&state.auth);
+        let session_id = register_request.session_id.clone();
+        let user_id = payload.uid.clone();
+        tokio::spawn(async move {
+            auth.report_session_started(&session_id, &user_id, None).await;
+        });
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<RelayMessage>();
     let register_response = match state.register(&register_request, tx.clone(), ip) {
@@ -536,6 +598,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelaySta
                 };
                 match frame {
                     Ok(Message::Binary(bytes)) => {
+                        bytes_up += bytes.len() as u64;
                         match decode_relay(&bytes) {
                             Ok(RelayMessage::Route(route)) => {
                                 // Validate the Route targets the sender's own session,
@@ -581,6 +644,9 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelaySta
                 let Some(message) = outbound else {
                     break;
                 };
+                if let Ok(encoded) = encode_relay(&message) {
+                    bytes_down += encoded.len() as u64;
+                }
                 if send_wire(&mut sink, &message).await.is_err() {
                     break;
                 }
@@ -590,11 +656,27 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelaySta
 
     state.set_disconnected(&register_request.session_id, register_request.role);
     state.notify_peer_status(&register_request.session_id, register_request.role, false);
+
+    let duration_ms = connected_at.elapsed().as_millis() as u64;
     info!(
         session_id = %register_request.session_id,
         role = ?register_request.role,
+        bytes_up,
+        bytes_down,
+        duration_ms,
         "peer disconnected"
     );
+
+    // Report session end to control API (fire-and-forget)
+    if let Some(ref payload) = api_key_payload {
+        let auth = Arc::clone(&state.auth);
+        let session_id = register_request.session_id.clone();
+        let user_id = payload.uid.clone();
+        tokio::spawn(async move {
+            auth.report_session_ended(&session_id, &user_id, bytes_up, bytes_down, duration_ms)
+                .await;
+        });
+    }
 }
 
 async fn send_wire(

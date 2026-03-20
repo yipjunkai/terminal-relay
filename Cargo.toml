@@ -10,6 +10,9 @@ resolver = "2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
+authors = ["Jun Kai Yip"]
+repository = "https://github.com/yipjunkai/terminal-relay"
+homepage = "https://terminal-relay.dev"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
