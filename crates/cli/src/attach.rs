@@ -418,6 +418,7 @@ fn resolve_pairing(args: &AttachArgs) -> anyhow::Result<PairingUri> {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("--pairing-code is required without --pairing-uri"))?,
         expected_fingerprint: args.expected_fingerprint.clone(),
+        api_key: None, // When attaching manually, the API key comes from the pairing URI
     })
 }
 
@@ -439,6 +440,7 @@ async fn connect_client(
             role: PeerRole::Client,
             resume_token,
         },
+        pairing.api_key.as_deref(),
     )
     .await
 }

@@ -279,6 +279,7 @@ fn pairing_vectors() -> Value {
         session_id: SESSION_ID.to_string(),
         pairing_code: "ABCDEF-GHIJKL-MNOPQR".to_string(),
         expected_fingerprint: Some(fingerprint(&host_public())),
+        api_key: None,
     };
     let uri = build_pairing_uri(&pairing).unwrap();
     let parsed = parse_pairing_uri(&uri).unwrap();
@@ -288,6 +289,7 @@ fn pairing_vectors() -> Value {
         session_id: SESSION_ID.to_string(),
         pairing_code: "XYZXYZ-XYZXYZ-XYZXYZ".to_string(),
         expected_fingerprint: None,
+        api_key: None,
     };
     let uri_no_fp = build_pairing_uri(&pairing_no_fp).unwrap();
 

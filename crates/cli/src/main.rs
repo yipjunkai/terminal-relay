@@ -1,6 +1,8 @@
+mod account;
 mod ai_tools;
 mod attach;
 mod common;
+mod config;
 mod constants;
 mod host;
 mod pty;
@@ -30,9 +32,26 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Start a host session (spawn an AI tool and share via relay).
     Start(HostArgs),
+    /// Attach to a remote session as a client.
     Attach(AttachArgs),
+    /// Authenticate with Terminal Relay.
+    Auth {
+        /// Email address to register a new account.
+        #[arg(long)]
+        email: Option<String>,
+        /// Existing API key to log in with.
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Log out and remove the stored API key.
+    Logout,
+    /// Show the current authentication status.
+    Status,
+    /// List known AI tools and their PATH availability.
     DetectTools,
+    /// List persisted session records.
     Sessions,
 }
 
@@ -54,6 +73,36 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Start(args) => run_host_sessions(args, store).await?,
         Command::Attach(args) => run_attach(args).await?,
+        Command::Auth { email, api_key } => {
+            account::auth(email.as_deref(), api_key.as_deref()).await?;
+        }
+        Command::Logout => {
+            account::logout()?;
+        }
+        Command::Status => {
+            let config = config::Config::load()?;
+            match config.api_key {
+                Some(key) => {
+                    let prefix = if key.len() > 16 {
+                        &key[..16]
+                    } else {
+                        &key
+                    };
+                    println!("Authenticated");
+                    println!("  API key:     {prefix}...");
+                    println!(
+                        "  Control API: {}",
+                        config
+                            .control_api_url
+                            .as_deref()
+                            .unwrap_or(constants::DEFAULT_CONTROL_API_URL)
+                    );
+                }
+                None => {
+                    println!("Not authenticated. Run `terminal-relay auth` to get started.");
+                }
+            }
+        }
         Command::DetectTools => {
             for tool in detect_known_tools() {
                 println!(

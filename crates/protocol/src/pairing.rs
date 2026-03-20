@@ -1,4 +1,4 @@
-use rand::{Rng, distributions::Alphanumeric, thread_rng};
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use url::Url;
 use uuid::Uuid;
 
@@ -10,6 +10,7 @@ pub struct PairingUri {
     pub session_id: String,
     pub pairing_code: String,
     pub expected_fingerprint: Option<String>,
+    pub api_key: Option<String>,
 }
 
 pub fn new_session_id() -> String {
@@ -45,6 +46,10 @@ pub fn build_pairing_uri(pairing: &PairingUri) -> CoreResult<String> {
             .append_pair("fingerprint", fingerprint);
     }
 
+    if let Some(api_key) = &pairing.api_key {
+        url.query_pairs_mut().append_pair("key", api_key);
+    }
+
     Ok(url.to_string())
 }
 
@@ -58,6 +63,7 @@ pub fn parse_pairing_uri(input: &str) -> CoreResult<PairingUri> {
     let mut session_id = None;
     let mut pairing_code = None;
     let mut expected_fingerprint = None;
+    let mut api_key = None;
 
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
@@ -65,6 +71,7 @@ pub fn parse_pairing_uri(input: &str) -> CoreResult<PairingUri> {
             "session" => session_id = Some(value.to_string()),
             "code" => pairing_code = Some(value.to_string()),
             "fingerprint" => expected_fingerprint = Some(value.to_string()),
+            "key" => api_key = Some(value.to_string()),
             _ => {}
         }
     }
@@ -74,6 +81,7 @@ pub fn parse_pairing_uri(input: &str) -> CoreResult<PairingUri> {
         session_id: session_id.ok_or(CoreError::InvalidPairingUri)?,
         pairing_code: pairing_code.ok_or(CoreError::InvalidPairingUri)?,
         expected_fingerprint,
+        api_key,
     })
 }
 
@@ -88,6 +96,7 @@ mod tests {
             session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             pairing_code: "ABC123-DEF456-GHI789".to_string(),
             expected_fingerprint: None,
+            api_key: None,
         };
 
         let uri_str = build_pairing_uri(&original).unwrap();
@@ -106,6 +115,7 @@ mod tests {
             session_id: "test-session".to_string(),
             pairing_code: "AAAAAA-BBBBBB-CCCCCC".to_string(),
             expected_fingerprint: Some("abcdef0123456789".to_string()),
+            api_key: None,
         };
 
         let uri_str = build_pairing_uri(&original).unwrap();

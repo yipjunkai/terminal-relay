@@ -166,6 +166,9 @@ Authentication and billing belong in the control API (`control/`), not in the op
 - [x] Add revocation list sync: relay fetches `GET /internal/revoked-keys` from control API every 60s, caches `key_id` set in memory. Control API endpoint authenticated with `X-Internal-Secret` header.
 - [x] Add relay session lifecycle callbacks: `POST /internal/session-started` and `POST /internal/session-ended { session_id, user_id, bytes_up, bytes_down, duration_ms }` to the control API for usage metering. Relay tracks bytes up/down per connection and reports on disconnect.
 - [x] Add WebSocket proxy endpoint as interim solution (to be removed once signed key flow is validated end-to-end).
+- [x] Add `TERMINAL_RELAY_CONTROL_URL` env var support to CLI auth command for local development and testing.
+- [x] Update Flutter mobile app to parse `api_key` from pairing URI `&key=` param and append `?api_key=` to WebSocket URL on connect. 58 Flutter tests passing.
+- [x] Create initial Prisma migration (`20260319_initial`) for all tables (users, api_keys, sessions, usage) with indexes and foreign keys.
 
 #### Signed API key architecture
 
@@ -189,11 +192,13 @@ API keys are **self-validating signed tokens** so the relay can verify them loca
 
 #### Remaining
 
+- [ ] Add a helpful error message when connecting to the hosted relay without an API key. If `api_key` is `None` and the relay URL is the production default, print: `"No API key found. Run 'terminal-relay auth' to authenticate."` instead of a cryptic connection failure.
 - [ ] Add periodic relay heartbeat (`POST /internal/heartbeat { active_sessions }`) so control API can detect and reconcile stale sessions from relay crashes.
 - [ ] Remove the WebSocket proxy from the control API once signed key flow is validated end-to-end.
-- [ ] Add `terminal-relay register` / `terminal-relay login` CLI commands: hit control API, store signed API key in `~/.terminal-relay/config.toml`.
-- [ ] Update pairing URI to include `api_key` so mobile app connects through the same authenticated path.
-- [ ] Add tests for signed key generation/verification (control API) and HMAC verification/revocation (relay auth.rs).
+- [x] Add `terminal-relay auth` CLI command: consolidates registration (`--email`) and login (`--api-key`) into a single entry point. Stores signed API key in `~/.terminal-relay/config.toml`. Also added `terminal-relay logout` and `terminal-relay status`.
+- [x] Update pairing URI to include `api_key` so mobile app connects through the same authenticated path. Added `api_key` field to `PairingUri` struct, serialized as `&key=` param.
+- [x] Update `relay_client.rs` to append `?api_key=` to WebSocket URL when a key is available. Host reads key from CLI arg → env var → config file. Attach reads key from pairing URI.
+- [x] Add tests for signed key generation/verification (control API: 14 tests) and HMAC verification/revocation (relay auth.rs: 20 tests). Covers roundtrip, tampered payload/signature, wrong secret, revocation, dual-secret rotation, malformed input, constant-time comparison, and cross-platform compatibility.
 #### Key lifecycle and secret rotation (planned)
 
 Two-layer rotation strategy inspired by Infisical's active/inactive/revoked model. User-level key rotation and infra-level HMAC secret rotation work together — regular key rotation at the user level ensures all active keys are re-signed before an old HMAC secret is dropped.
@@ -212,7 +217,7 @@ API keys have a `status` field tracking their lifecycle. The control API marks k
 
 The HMAC secret used to sign API keys needs periodic rotation. The relay supports dual verification during a transition window. Because user-level key rotation re-signs keys with the current secret on a regular cadence, all active keys naturally migrate to the new secret before the old one is dropped.
 
-- [ ] Support multiple HMAC secrets on the relay (`HMAC_SECRET_CURRENT` + `HMAC_SECRET_PREVIOUS`). On verification, try current first, fall back to previous.
+- [x] Support multiple HMAC secrets on the relay (`HMAC_SECRET` + `HMAC_SECRET_PREVIOUS`). On verification, try current first, fall back to previous. Tested with dual-secret acceptance and rejection.
 - [ ] Rotation procedure: generate new secret → deploy to relays as `HMAC_SECRET_CURRENT` (old secret moves to `HMAC_SECRET_PREVIOUS`) → new keys are signed with the new secret → after grace period (e.g., 30 days, long enough for user-level key rotation to re-sign all active keys), drop `HMAC_SECRET_PREVIOUS`.
 - [ ] Add `signing_secret_version` to the signed key payload so the relay knows which secret to verify with, avoiding trial-and-error.
 
@@ -224,10 +229,17 @@ The HMAC secret used to sign API keys needs periodic rotation. The relay support
 
 ## User experience
 
+- [ ] Replace `terminal-relay auth --email` / `--api-key` with a device authorization flow (like `gh auth login`). The CLI runs `terminal-relay auth`, displays a URL + short code, user authenticates in browser, CLI polls for completion, receives API key automatically. Current `--email`/`--api-key` flags remain as fallbacks. Full breakdown:
+  - [ ] Add device code endpoints in control API: `POST /auth/device/code` (returns `device_code`, `user_code`, `verification_uri`, `expires_in`, `interval`) and `POST /auth/device/poll` (client polls with `device_code`, returns `pending`/`authorized`/`expired`).
+  - [ ] Build web frontend at `terminal-relay.dev/activate` where users enter the short code. Page validates the code against the control API, then presents sign-up or login (email, OAuth via GitHub/Google — Clerk integration point).
+  - [ ] On successful browser auth, the control API marks the device code as authorized and generates a signed API key for the user. The polling CLI receives the key and stores it.
+  - [ ] Update `terminal-relay auth` to default to the device flow when run with no flags: print the URL + code, open the browser automatically (`open` / `xdg-open`), poll with a spinner, save the key on success.
+  - [ ] Add account management web dashboard at `terminal-relay.dev/dashboard`: view/revoke API keys, see usage, manage billing. This is where Clerk would handle user sessions and the API key CRUD endpoints are already built.
+- [x] Add a user config file (`~/.terminal-relay/config.toml`) for API key and preferences. File permissions 0600, directory 0700.
 - [ ] Add colored/formatted CLI output for session status, pairing info, and error messages instead of raw `println!`.
 - [ ] Add human-readable session names (e.g. `claude-backend-a3f`) instead of raw UUIDs in CLI output and QR codes.
 - [ ] Add a first-run setup flow: detect installed AI tools, confirm default tool, display a quick-start summary.
-- [ ] Add a user config file (`~/.terminal-relay/config.toml`) for default tool, default args, and preferences.
+- [ ] Add default tool and args to `~/.terminal-relay/config.toml`.
 - [ ] Add shell completions generation (`terminal-relay completions bash/zsh/fish`).
 - [ ] Add auto-update check on startup: warn the user if a newer CLI version is available (with `--no-update-check` to suppress).
 - [ ] Add a connection quality indicator on the attach side (latency, connection state) rendered in a status bar.

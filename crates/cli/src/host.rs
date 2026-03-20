@@ -44,6 +44,9 @@ use crate::{
 pub struct HostArgs {
     #[arg(long, default_value = crate::constants::DEFAULT_RELAY_URL, env = crate::constants::RELAY_URL_ENV, hide = true)]
     pub relay_url: String,
+    /// API key for authenticating with the relay. Reads from config if not specified.
+    #[arg(long, env = crate::constants::API_KEY_ENV, hide = true)]
+    pub api_key: Option<String>,
     /// AI tool to run. Auto-detects if not specified. Accepts known tool names
     /// (claude, opencode, copilot, gemini, aider) or any command on PATH.
     #[arg(long)]
@@ -63,11 +66,19 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
     let tool = resolve_tool(args.tool.as_deref(), &args.tool_args)?;
     let (rows, cols) = initial_size(args.rows, args.cols);
 
+    // Resolve API key: CLI arg > env var > config file
+    let api_key = args.api_key.or_else(|| {
+        crate::config::Config::load()
+            .ok()
+            .and_then(|c| c.api_key)
+    });
+
     run_single_host_session(HostSessionParams {
         tool_name: tool.name,
         command: tool.command,
         args: tool.args,
         relay_url: args.relay_url,
+        api_key,
         rows,
         cols,
         no_qr: args.no_qr,
@@ -81,6 +92,7 @@ struct HostSessionParams {
     command: String,
     args: Vec<String>,
     relay_url: String,
+    api_key: Option<String>,
     rows: u16,
     cols: u16,
     no_qr: bool,
@@ -93,6 +105,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         command,
         args,
         relay_url,
+        api_key,
         rows,
         cols,
         no_qr,
@@ -105,7 +118,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     let local_fingerprint = fingerprint(&local_key.public);
 
     let (mut relay, registered) =
-        connect_host(&relay_url, &session_id, &pairing_code, None).await?;
+        connect_host(&relay_url, &session_id, &pairing_code, None, api_key.as_deref()).await?;
     let mut relay_tx = relay.sender();
     let mut resume_token = registered.resume_token.clone();
 
@@ -114,6 +127,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         session_id: session_id.clone(),
         pairing_code: pairing_code.clone(),
         expected_fingerprint: Some(local_fingerprint.clone()),
+        api_key: api_key.clone(),
     })?;
 
     let record = SessionRecord {
@@ -224,7 +238,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                     Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
                     None => {
                         warn!(session_id = %identity.session_id, "relay disconnected, attempting recovery");
-                        let (new_relay, new_registered) = reconnect_host(&relay_url, &identity.session_id, &pairing_code, &resume_token).await?;
+                        let (new_relay, new_registered) = reconnect_host(&relay_url, &identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
                         relay = new_relay;
                         relay_tx = relay.sender();
                         resume_token = new_registered.resume_token.clone();
@@ -436,6 +450,7 @@ async fn connect_host(
     session_id: &str,
     pairing_code: &str,
     resume_token: Option<String>,
+    api_key: Option<&str>,
 ) -> anyhow::Result<(
     RelayConnection,
     protocol::protocol::RegisterResponse,
@@ -451,6 +466,7 @@ async fn connect_host(
             role: PeerRole::Host,
             resume_token,
         },
+        api_key,
     )
     .await
 }
@@ -463,6 +479,7 @@ async fn reconnect_host(
     session_id: &str,
     pairing_code: &str,
     resume_token: &str,
+    api_key: Option<&str>,
 ) -> anyhow::Result<(
     RelayConnection,
     protocol::protocol::RegisterResponse,
@@ -475,6 +492,7 @@ async fn reconnect_host(
                 session_id,
                 pairing_code,
                 Some(resume_token.to_string()),
+                api_key,
             ) => {
                 match result {
                     Ok(connection) => return Ok(connection),

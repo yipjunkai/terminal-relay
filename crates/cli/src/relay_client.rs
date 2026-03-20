@@ -22,8 +22,9 @@ impl RelayConnection {
     pub async fn connect(
         url: &str,
         register: RegisterRequest,
+        api_key: Option<&str>,
     ) -> anyhow::Result<(Self, RegisterResponse)> {
-        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(url, register))
+        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(url, register, api_key))
             .await
             .map_err(|_| {
                 anyhow::anyhow!("connection to relay timed out after {CONNECT_TIMEOUT:?}")
@@ -33,8 +34,18 @@ impl RelayConnection {
     async fn connect_inner(
         url: &str,
         register: RegisterRequest,
+        api_key: Option<&str>,
     ) -> anyhow::Result<(Self, RegisterResponse)> {
-        let (ws, _) = connect_async(url)
+        // Append API key as query parameter if provided
+        let connect_url = match api_key {
+            Some(key) => {
+                let separator = if url.contains('?') { '&' } else { '?' };
+                format!("{url}{separator}api_key={key}")
+            }
+            None => url.to_string(),
+        };
+
+        let (ws, _) = connect_async(&connect_url)
             .await
             .with_context(|| format!("failed connecting to relay url {url}"))?;
         let (mut sink, mut stream) = ws.split();
