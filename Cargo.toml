@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/terminal-relay-core",
-    "crates/terminal-relay-server",
-    "crates/terminal-relay-cli",
+    "crates/protocol",
+    "crates/relay",
+    "crates/cli",
 ]
 resolver = "2"
 

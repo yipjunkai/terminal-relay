@@ -287,6 +287,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "clap",
+ "crossterm",
+ "dirs",
+ "dotenvy",
+ "futures-util",
+ "portable-pty",
+ "protocol",
+ "qrcode",
+ "rand 0.8.5",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "tracing-subscriber",
+ "which",
+ "zeroize",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1253,6 +1281,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "hex",
+ "hkdf",
+ "hmac",
+ "rand 0.8.5",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1383,6 +1431,25 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dashmap",
+ "futures-util",
+ "protocol",
+ "rand 0.8.5",
+ "semver",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "ring"
@@ -1768,72 +1835,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "terminal-relay-cli"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "clap",
- "crossterm",
- "dirs",
- "dotenvy",
- "futures-util",
- "portable-pty",
- "qrcode",
- "rand 0.8.5",
- "rustls",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "terminal-relay-core",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tracing",
- "tracing-subscriber",
- "which",
- "zeroize",
-]
-
-[[package]]
-name = "terminal-relay-core"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "hex",
- "hkdf",
- "hmac",
- "rand 0.8.5",
- "rmp-serde",
- "serde",
- "sha2",
- "thiserror 2.0.18",
- "url",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "terminal-relay-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "dashmap",
- "futures-util",
- "rand 0.8.5",
- "semver",
- "serde_json",
- "terminal-relay-core",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
