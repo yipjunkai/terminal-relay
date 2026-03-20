@@ -248,3 +248,207 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SECRET: &str = "test-hmac-secret-for-unit-tests";
+    const TEST_SECRET_PREV: &str = "old-hmac-secret-from-previous-rotation";
+
+    /// Helper: build a signed API key the same way the control API does.
+    fn build_signed_key(secret: &str, uid: &str, kid: &str, tier: &str, iat: u64) -> String {
+        let payload_json =
+            format!(r#"{{"uid":"{uid}","kid":"{kid}","tier":"{tier}","iat":{iat}}}"#);
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload_json.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let combined = format!("{payload_json}.{signature}");
+        format!("tr_{}", URL_SAFE_NO_PAD.encode(combined.as_bytes()))
+    }
+
+    fn auth_state(secret: &str, previous: Option<&str>) -> AuthState {
+        AuthState::new(
+            secret.to_string(),
+            previous.map(|s| s.to_string()),
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn valid_key_roundtrip() {
+        let state = auth_state(TEST_SECRET, None);
+        let key = build_signed_key(TEST_SECRET, "user-123", "key-456", "pro", 1700000000);
+
+        let payload = state.verify_api_key(&key).await.expect("should verify");
+        assert_eq!(payload.uid, "user-123");
+        assert_eq!(payload.kid, "key-456");
+        assert_eq!(payload.tier, "pro");
+        assert_eq!(payload.iat, 1700000000);
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_prefix() {
+        let state = auth_state(TEST_SECRET, None);
+        assert!(state.verify_api_key("notakey").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_key() {
+        let state = auth_state(TEST_SECRET, None);
+        assert!(state.verify_api_key("").await.is_none());
+        assert!(state.verify_api_key("tr_").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_base64() {
+        let state = auth_state(TEST_SECRET, None);
+        assert!(state.verify_api_key("tr_not-valid-base64!!!").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_wrong_secret() {
+        let state = auth_state(TEST_SECRET, None);
+        let key = build_signed_key("wrong-secret", "user-123", "key-456", "free", 1700000000);
+        assert!(state.verify_api_key(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_payload() {
+        let state = auth_state(TEST_SECRET, None);
+        let key = build_signed_key(TEST_SECRET, "user-123", "key-456", "free", 1700000000);
+
+        // Decode, tamper with tier, re-encode (signature is now invalid)
+        let decoded = URL_SAFE_NO_PAD.decode(&key[3..]).unwrap();
+        let decoded_str = std::str::from_utf8(&decoded).unwrap();
+        let tampered = decoded_str.replace(r#""free""#, r#""enterprise""#);
+        let tampered_key = format!("tr_{}", URL_SAFE_NO_PAD.encode(tampered.as_bytes()));
+
+        assert!(state.verify_api_key(&tampered_key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_signature() {
+        let state = auth_state(TEST_SECRET, None);
+        let key = build_signed_key(TEST_SECRET, "user-123", "key-456", "free", 1700000000);
+
+        // Decode, flip a character in the signature
+        let decoded = URL_SAFE_NO_PAD.decode(&key[3..]).unwrap();
+        let mut decoded_str = std::str::from_utf8(&decoded).unwrap().to_string();
+        let last_char = decoded_str.pop().unwrap();
+        let replacement = if last_char == 'a' { 'b' } else { 'a' };
+        decoded_str.push(replacement);
+        let tampered_key = format!("tr_{}", URL_SAFE_NO_PAD.encode(decoded_str.as_bytes()));
+
+        assert!(state.verify_api_key(&tampered_key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_json_payload() {
+        let state = auth_state(TEST_SECRET, None);
+        // Valid HMAC over garbage JSON
+        let payload_json = "not-valid-json";
+        let mut mac = HmacSha256::new_from_slice(TEST_SECRET.as_bytes()).unwrap();
+        mac.update(payload_json.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let combined = format!("{payload_json}.{signature}");
+        let key = format!("tr_{}", URL_SAFE_NO_PAD.encode(combined.as_bytes()));
+
+        assert!(state.verify_api_key(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_no_dot_separator() {
+        let state = auth_state(TEST_SECRET, None);
+        let no_dot = URL_SAFE_NO_PAD.encode(b"nodotinthisstring");
+        let key = format!("tr_{no_dot}");
+        assert!(state.verify_api_key(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn revoked_key_is_rejected() {
+        let state = auth_state(TEST_SECRET, None);
+        let key = build_signed_key(TEST_SECRET, "user-123", "revoked-key-id", "free", 1700000000);
+
+        // Add to revocation list
+        {
+            let mut revoked = state.revoked_keys.write().await;
+            revoked.insert("revoked-key-id".to_string());
+        }
+
+        assert!(state.verify_api_key(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_revoked_key_with_populated_list() {
+        let state = auth_state(TEST_SECRET, None);
+        let key = build_signed_key(TEST_SECRET, "user-123", "good-key-id", "free", 1700000000);
+
+        // Add a different key to revocation list
+        {
+            let mut revoked = state.revoked_keys.write().await;
+            revoked.insert("other-key-id".to_string());
+        }
+
+        let payload = state.verify_api_key(&key).await.expect("should verify");
+        assert_eq!(payload.kid, "good-key-id");
+    }
+
+    #[tokio::test]
+    async fn dual_secret_accepts_current() {
+        let state = auth_state(TEST_SECRET, Some(TEST_SECRET_PREV));
+        let key = build_signed_key(TEST_SECRET, "user-1", "key-1", "pro", 1700000000);
+
+        let payload = state.verify_api_key(&key).await.expect("should verify with current");
+        assert_eq!(payload.uid, "user-1");
+    }
+
+    #[tokio::test]
+    async fn dual_secret_accepts_previous() {
+        let state = auth_state(TEST_SECRET, Some(TEST_SECRET_PREV));
+        let key = build_signed_key(TEST_SECRET_PREV, "user-2", "key-2", "free", 1700000000);
+
+        let payload = state.verify_api_key(&key).await.expect("should verify with previous");
+        assert_eq!(payload.uid, "user-2");
+    }
+
+    #[tokio::test]
+    async fn dual_secret_rejects_unknown() {
+        let state = auth_state(TEST_SECRET, Some(TEST_SECRET_PREV));
+        let key = build_signed_key("completely-different", "user-3", "key-3", "free", 1700000000);
+        assert!(state.verify_api_key(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn is_enabled_with_secret() {
+        let state = auth_state(TEST_SECRET, None);
+        assert!(state.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn is_disabled_without_secret() {
+        let state = auth_state("", None);
+        assert!(!state.is_enabled());
+    }
+
+    #[test]
+    fn constant_time_eq_same() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_different() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer string"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty() {
+        assert!(constant_time_eq(b"", b""));
+    }
+}
