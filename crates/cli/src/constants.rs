@@ -2,15 +2,18 @@
 pub const DEFAULT_RELAY_URL: &str = "wss://terminal-relay.fly.dev/ws";
 
 /// Production control API URL for registration and key management.
+#[cfg(feature = "hosted")]
 pub const DEFAULT_CONTROL_API_URL: &str = "https://terminal-relay-control.fly.dev";
 
 /// Environment variable name to override the relay URL.
 pub const RELAY_URL_ENV: &str = "TERMINAL_RELAY_URL";
 
 /// Environment variable name to override the control API URL.
+#[cfg(feature = "hosted")]
 pub const CONTROL_API_URL_ENV: &str = "TERMINAL_RELAY_CONTROL_URL";
 
 /// Environment variable name for the API key.
+#[cfg(feature = "hosted")]
 pub const API_KEY_ENV: &str = "TERMINAL_RELAY_API_KEY";
 
 /// Directory name for local state (under user's home directory).

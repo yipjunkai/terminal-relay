@@ -45,6 +45,7 @@ pub struct HostArgs {
     #[arg(long, default_value = crate::constants::DEFAULT_RELAY_URL, env = crate::constants::RELAY_URL_ENV, hide = true)]
     pub relay_url: String,
     /// API key for authenticating with the relay. Reads from config if not specified.
+    #[cfg(feature = "hosted")]
     #[arg(long, env = crate::constants::API_KEY_ENV, hide = true)]
     pub api_key: Option<String>,
     /// AI tool to run. Auto-detects if not specified. Accepts known tool names
@@ -66,20 +67,24 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
     let tool = resolve_tool(args.tool.as_deref(), &args.tool_args)?;
     let (rows, cols) = initial_size(args.rows, args.cols);
 
-    // Resolve API key: CLI arg > env var > config file
-    let api_key = args.api_key.or_else(|| {
-        crate::config::Config::load()
-            .ok()
-            .and_then(|c| c.api_key)
-    });
-
-    // Warn if connecting to the production relay without an API key
-    if api_key.is_none() && args.relay_url == crate::constants::DEFAULT_RELAY_URL {
-        eprintln!("Warning: No API key found. The hosted relay requires authentication.");
-        eprintln!("Run `terminal-relay auth --email <your-email>` to register, or");
-        eprintln!("    `terminal-relay auth --api-key <key>` to log in.\n");
-        return Err(anyhow::anyhow!("authentication required"));
-    }
+    // Resolve API key: CLI arg > env var > config file (hosted builds only).
+    #[cfg(feature = "hosted")]
+    let api_key = {
+        let key = args.api_key.or_else(|| {
+            crate::config::Config::load()
+                .ok()
+                .and_then(|c| c.api_key)
+        });
+        // Warn if connecting to the production relay without an API key.
+        if key.is_none() && args.relay_url == crate::constants::DEFAULT_RELAY_URL {
+            eprintln!("Warning: No API key found. The hosted relay requires authentication.");
+            eprintln!("Run `terminal-relay auth` to authenticate.\n");
+            return Err(anyhow::anyhow!("authentication required"));
+        }
+        key
+    };
+    #[cfg(not(feature = "hosted"))]
+    let api_key: Option<String> = None;
 
     run_single_host_session(HostSessionParams {
         tool_name: tool.name,

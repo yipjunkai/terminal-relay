@@ -183,7 +183,7 @@ All WebSocket messages are MessagePack-encoded across three layers:
 
 ## Self-hosting
 
-Run your own relay server:
+Run your own relay server. No account, API key, or control API is needed — the relay runs in open mode by default:
 
 ```bash
 # From source
@@ -204,6 +204,8 @@ Point the CLI at your relay:
 TERMINAL_RELAY_URL=ws://your-server:8080/ws terminal-relay start
 ```
 
+> **Note:** The `terminal-relay auth` command is for the hosted service only. Self-hosted relays run unauthenticated by default — you do not need to register or log in. If you install from source, the CLI builds without hosted service features (`cargo build -p cli`). Pre-built binaries include hosted service support but it is unused when connecting to a self-hosted relay.
+
 ### Relay server flags
 
 | Flag                    | Env var                     | Default         | Description             |
@@ -220,8 +222,11 @@ TERMINAL_RELAY_URL=ws://your-server:8080/ws terminal-relay start
 # Run the relay server locally
 cargo run -p relay -- --bind 0.0.0.0:8080
 
-# Run the CLI against local relay
+# Run the CLI against local relay (self-hosted, no auth)
 TERMINAL_RELAY_URL=ws://127.0.0.1:8080/ws cargo run -p cli -- start
+
+# Run the CLI with hosted service features (auth, device flow)
+TERMINAL_RELAY_URL=ws://127.0.0.1:8080/ws cargo run -p cli --features hosted -- start
 
 # Attach from another terminal
 cargo run -p cli -- attach --pairing-uri "termrelay://pair?..."
@@ -229,6 +234,15 @@ cargo run -p cli -- attach --pairing-uri "termrelay://pair?..."
 # Run tests
 cargo test
 ```
+
+### Feature flags
+
+The CLI crate has an optional `hosted` feature that enables integration with the Terminal Relay hosted service (authentication, device flow, account management). Without it, the CLI is a standalone relay + PTY tool.
+
+| Build command | Includes auth? | Use case |
+| --- | --- | --- |
+| `cargo build -p cli` | No | Self-hosted / contributors |
+| `cargo build -p cli --features hosted` | Yes | Hosted service users (used by CI, Homebrew, install.sh) |
 
 ## License
 

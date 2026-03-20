@@ -1,3 +1,4 @@
+#[cfg(feature = "hosted")]
 mod account;
 mod ai_tools;
 mod attach;
@@ -36,7 +37,8 @@ enum Command {
     Start(HostArgs),
     /// Attach to a remote session as a client.
     Attach(AttachArgs),
-    /// Authenticate with Terminal Relay.
+    /// Authenticate with the Terminal Relay hosted service.
+    #[cfg(feature = "hosted")]
     Auth {
         /// Email address to register a new account.
         #[arg(long)]
@@ -49,8 +51,10 @@ enum Command {
         invite_code: Option<String>,
     },
     /// Log out and remove the stored API key.
+    #[cfg(feature = "hosted")]
     Logout,
     /// Show the current authentication status.
+    #[cfg(feature = "hosted")]
     Status,
     /// List known AI tools and their PATH availability.
     DetectTools,
@@ -76,12 +80,15 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Start(args) => run_host_sessions(args, store).await?,
         Command::Attach(args) => run_attach(args).await?,
+        #[cfg(feature = "hosted")]
         Command::Auth { email, api_key, invite_code } => {
             account::auth(email.as_deref(), api_key.as_deref(), invite_code.as_deref()).await?;
         }
+        #[cfg(feature = "hosted")]
         Command::Logout => {
             account::logout()?;
         }
+        #[cfg(feature = "hosted")]
         Command::Status => {
             let config = config::Config::load()?;
             match config.api_key {
