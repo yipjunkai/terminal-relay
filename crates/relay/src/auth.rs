@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::sync::RwLock;
@@ -304,7 +304,12 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_base64() {
         let state = auth_state(TEST_SECRET, None);
-        assert!(state.verify_api_key("tr_not-valid-base64!!!").await.is_none());
+        assert!(
+            state
+                .verify_api_key("tr_not-valid-base64!!!")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -369,7 +374,13 @@ mod tests {
     #[tokio::test]
     async fn revoked_key_is_rejected() {
         let state = auth_state(TEST_SECRET, None);
-        let key = build_signed_key(TEST_SECRET, "user-123", "revoked-key-id", "free", 1700000000);
+        let key = build_signed_key(
+            TEST_SECRET,
+            "user-123",
+            "revoked-key-id",
+            "free",
+            1700000000,
+        );
 
         // Add to revocation list
         {
@@ -400,7 +411,10 @@ mod tests {
         let state = auth_state(TEST_SECRET, Some(TEST_SECRET_PREV));
         let key = build_signed_key(TEST_SECRET, "user-1", "key-1", "pro", 1700000000);
 
-        let payload = state.verify_api_key(&key).await.expect("should verify with current");
+        let payload = state
+            .verify_api_key(&key)
+            .await
+            .expect("should verify with current");
         assert_eq!(payload.uid, "user-1");
     }
 
@@ -409,14 +423,23 @@ mod tests {
         let state = auth_state(TEST_SECRET, Some(TEST_SECRET_PREV));
         let key = build_signed_key(TEST_SECRET_PREV, "user-2", "key-2", "free", 1700000000);
 
-        let payload = state.verify_api_key(&key).await.expect("should verify with previous");
+        let payload = state
+            .verify_api_key(&key)
+            .await
+            .expect("should verify with previous");
         assert_eq!(payload.uid, "user-2");
     }
 
     #[tokio::test]
     async fn dual_secret_rejects_unknown() {
         let state = auth_state(TEST_SECRET, Some(TEST_SECRET_PREV));
-        let key = build_signed_key("completely-different", "user-3", "key-3", "free", 1700000000);
+        let key = build_signed_key(
+            "completely-different",
+            "user-3",
+            "key-3",
+            "free",
+            1700000000,
+        );
         assert!(state.verify_api_key(&key).await.is_none());
     }
 
