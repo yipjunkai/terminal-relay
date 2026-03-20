@@ -17,12 +17,22 @@ Your Device                          Cloud                           Remote Devi
 
 The relay is a dumb pipe — it forwards opaque encrypted bytes and never sees your data.
 
+## Install
+
+```bash
+# macOS (Homebrew)
+brew install yipjunkai/terminal-relay/terminal-relay
+
+# macOS / Linux (script)
+curl -fsSL https://raw.githubusercontent.com/yipjunkai/terminal-relay/main/install.sh | sh
+
+# From source
+cargo install --git https://github.com/yipjunkai/terminal-relay --package cli
+```
+
 ## Quick start
 
 ```bash
-# Install
-cargo install terminal-relay
-
 # Start a session (connects to hosted relay automatically)
 terminal-relay start
 
@@ -171,6 +181,39 @@ All WebSocket messages are MessagePack-encoded across three layers:
 
 **Application-level** (`SecureMessage` inside Secure): PtyInput, PtyOutput, Resize, Heartbeat, VersionNotice, Notification
 
+## Self-hosting
+
+Run your own relay server:
+
+```bash
+# From source
+cargo run -p relay -- --bind 0.0.0.0:8080
+
+# With Docker
+docker run -p 8080:8080 ghcr.io/yipjunkai/terminal-relay:latest
+
+# With session limits
+cargo run -p relay -- --bind 0.0.0.0:8080 \
+  --max-sessions 100 \
+  --max-sessions-per-ip 10
+```
+
+Point the CLI at your relay:
+
+```bash
+TERMINAL_RELAY_URL=ws://your-server:8080/ws terminal-relay start
+```
+
+### Relay server flags
+
+| Flag                    | Env var                     | Default         | Description             |
+| ----------------------- | --------------------------- | --------------- | ----------------------- |
+| `--bind`                | —                           | `0.0.0.0:8080`  | Listen address          |
+| `--max-sessions`        | `RELAY_MAX_SESSIONS`        | `0` (unlimited) | Global session cap      |
+| `--max-sessions-per-ip` | `RELAY_MAX_SESSIONS_PER_IP` | `0` (unlimited) | Per-IP session cap      |
+| `--session-ttl-secs`    | —                           | `86400` (24h)   | Inactive session expiry |
+| `--min-version`         | —                           | `0.1.0`         | Minimum client version  |
+
 ## Development
 
 ```bash
@@ -178,10 +221,13 @@ All WebSocket messages are MessagePack-encoded across three layers:
 cargo run -p relay -- --bind 0.0.0.0:8080
 
 # Run the CLI against local relay
-cargo run -p cli -- start --relay-url ws://127.0.0.1:8080/ws --tool auto
+TERMINAL_RELAY_URL=ws://127.0.0.1:8080/ws cargo run -p cli -- start
 
 # Attach from another terminal
 cargo run -p cli -- attach --pairing-uri "termrelay://pair?..."
+
+# Run tests
+cargo test
 ```
 
 ## License

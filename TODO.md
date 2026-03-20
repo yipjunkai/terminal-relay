@@ -204,11 +204,11 @@ Authentication and billing belong in the control API (`control/`), not in the op
 
 ## Packaging & distribution
 
-- [ ] Add crate metadata (`description`, `repository`, `homepage`, `keywords`, `authors`) to all `Cargo.toml` files.
-- [ ] Publish prebuilt binaries for macOS (Intel + Apple Silicon), Linux (x64 + ARM64), and Windows (x64). Set up CI release pipeline.
+- [x] Add crate metadata (`description`, `repository`, `homepage`, `keywords`, `authors`) to all `Cargo.toml` files.
+- [x] Publish prebuilt binaries for macOS (Intel + Apple Silicon), Linux (x64 + ARM64). CI release pipeline via `.github/workflows/release.yml` — builds on tag push, uploads to GitHub Releases.
 - [ ] Add `cargo install terminal-relay` support (publish `terminal-relay-cli` to crates.io).
-- [ ] Add Homebrew formula and tap (`brew install terminal-relay`).
-- [ ] Add install script (`curl -fsSL https://terminal-relay.dev/install.sh | sh`) for quick onboarding.
+- [x] Add Homebrew formula (`Formula/terminal-relay.rb`). Use as tap: `brew install yipjunkai/terminal-relay/terminal-relay`. SHA256 hashes need filling after first release.
+- [x] Add install script (`install.sh`): `curl -fsSL https://raw.githubusercontent.com/yipjunkai/terminal-relay/main/install.sh | sh`.
 - [ ] Add optional Windows PTY support and CI coverage for macOS/Linux/Windows matrices.
 - [ ] Add documentation to `docs/`: protocol spec, architecture overview, deployment guide.
 - [ ] Add structured observability (metrics, traces, logs) for relay latency, dropped frames, reconnect attempts, and PTY health.
