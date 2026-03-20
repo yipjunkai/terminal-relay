@@ -17,25 +17,25 @@ class TerminalRelay < Formula
 
   on_macos do
     on_intel do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v#{version}/terminal-relay-v#{version}-x86_64-apple-darwin.tar.gz"
-      # sha256 populated by CI after first release
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-x86_64-apple-darwin.tar.gz"
+      sha256 "60934797714e512396ccc9421822f3e4bb371fdff7596ce0bfe9a2d26f239a31"
     end
 
     on_arm do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v#{version}/terminal-relay-v#{version}-aarch64-apple-darwin.tar.gz"
-      # sha256 populated by CI after first release
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-aarch64-apple-darwin.tar.gz"
+      sha256 "dc0e2c276fe3e0e9f5a58fb64c122b5d2d308a1a8e1ca84c63271a1ac7738e39"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v#{version}/terminal-relay-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      # sha256 populated by CI after first release
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "5a39134344ec1ec0f770b89f3d9ce0e2cd737daa409ba654103ce97bc9b4f6ad"
     end
 
     on_arm do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v#{version}/terminal-relay-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      # sha256 populated by CI after first release
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "bd19b043e48ec8c74f1e2a3d7af71490324a87b2a564f595796c5d62786f5f1b"
     end
   end
 
