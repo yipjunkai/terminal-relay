@@ -218,8 +218,9 @@ API keys have a `status` field tracking their lifecycle. The control API marks k
 The HMAC secret used to sign API keys needs periodic rotation. The relay supports dual verification during a transition window. Because user-level key rotation re-signs keys with the current secret on a regular cadence, all active keys naturally migrate to the new secret before the old one is dropped.
 
 - [x] Support multiple HMAC secrets on the relay (`HMAC_SECRET` + `HMAC_SECRET_PREVIOUS`). On verification, try current first, fall back to previous. Tested with dual-secret acceptance and rejection.
-- [ ] Rotation procedure: generate new secret → deploy to relays as `HMAC_SECRET_CURRENT` (old secret moves to `HMAC_SECRET_PREVIOUS`) → new keys are signed with the new secret → after grace period (e.g., 30 days, long enough for user-level key rotation to re-sign all active keys), drop `HMAC_SECRET_PREVIOUS`.
+- [ ] Rotation procedure: generate new secret → deploy to relays as `HMAC_SECRET` (old secret moves to `HMAC_SECRET_PREVIOUS`) → new keys are signed with the new secret → after grace period (e.g., 30 days, long enough for user-level key rotation to re-sign all active keys), drop `HMAC_SECRET_PREVIOUS`.
 - [ ] Add `signing_secret_version` to the signed key payload so the relay knows which secret to verify with, avoiding trial-and-error.
+- [ ] Automate secrets rotation via Infisical, Doppler, or similar secrets management platform. The platform would handle: (1) scheduled HMAC_SECRET rotation (generate new secret, push to both relay and control API as HMAC_SECRET, move old to HMAC_SECRET_PREVIOUS), (2) JWT_SECRET rotation on the control API, (3) INTERNAL_SECRET rotation between relay and control API, (4) audit logging of all secret access and rotation events. Evaluate Infisical (open-source, self-hostable), Doppler (managed, good Fly.io integration), and HashiCorp Vault (enterprise). This is a long-term operational concern — manual rotation is fine until there are paying users.
 
 #### Remaining
 
