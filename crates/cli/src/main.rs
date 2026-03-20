@@ -44,6 +44,9 @@ enum Command {
         /// Existing API key to log in with.
         #[arg(long)]
         api_key: Option<String>,
+        /// Invite code (required for new registrations).
+        #[arg(long)]
+        invite_code: Option<String>,
     },
     /// Log out and remove the stored API key.
     Logout,
@@ -73,8 +76,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Start(args) => run_host_sessions(args, store).await?,
         Command::Attach(args) => run_attach(args).await?,
-        Command::Auth { email, api_key } => {
-            account::auth(email.as_deref(), api_key.as_deref()).await?;
+        Command::Auth { email, api_key, invite_code } => {
+            account::auth(email.as_deref(), api_key.as_deref(), invite_code.as_deref()).await?;
         }
         Command::Logout => {
             account::logout()?;

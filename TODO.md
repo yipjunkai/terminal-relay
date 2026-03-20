@@ -4,11 +4,16 @@
 
 The path from "installed the CLI" to "session running on my phone" must be frictionless.
 
-- [ ] **Device authorization flow** — Replace `terminal-relay auth --email` / `--api-key` with a browser-based flow (like `gh auth login`). User runs `terminal-relay auth`, sees a URL + short code, authenticates in browser, CLI polls and saves the key. Current flags remain as fallbacks.
-  - [ ] Control API: `POST /auth/device/code` and `POST /auth/device/poll` endpoints.
-  - [ ] Web frontend at `terminal-relay.dev/activate` for entering the code (sign-up or login via email/OAuth — Clerk integration point).
-  - [ ] CLI: default to device flow when no flags given. Print URL + code, auto-open browser, poll with spinner.
+- [x] **Device authorization flow** — `terminal-relay auth` opens browser, user enters code + email + invite code, CLI polls and saves the key. Flags (`--email`, `--api-key`, `--invite-code`) remain as fallbacks.
+  - [x] Control API: `POST /auth/device/code`, `POST /auth/device/poll`, `POST /auth/device/activate` endpoints.
+  - [x] Inline activation page served at `GET /activate` (no separate frontend build).
+  - [x] CLI: default to device flow when no flags given. Print URL + code, auto-open browser, poll with spinner.
+  - [x] Invite code gating on registration (`INVITE_CODES` env var, constant-time comparison).
+  - [x] Rate limiting on auth endpoints (`@nestjs/throttler`).
+  - [x] CORS lockdown (configurable `CORS_ORIGINS` env var).
+  - [x] Constant-time internal secret comparison.
   - [ ] Web dashboard at `terminal-relay.dev/dashboard`: manage API keys, view usage, billing.
+  - [ ] Replace inline activation page with Clerk/OAuth integration for production.
 - [x] `terminal-relay auth` CLI command (email/api-key flags), `logout`, `status`. Config stored in `~/.terminal-relay/config.toml`.
 - [x] Helpful error message when connecting without API key or with expired/revoked key.
 - [ ] **First-run setup flow** — On first `terminal-relay start`, detect installed AI tools, confirm default tool, display quick-start summary. Consider onboarding walkthrough in mobile app with demo mode (fake session so users can try the UI before setting up the CLI).
@@ -169,6 +174,8 @@ Expands the current single-viewer model into a collaboration platform. Feeds the
 
 Manual rotation is fine until there are paying users. This section is reference for when it becomes necessary.
 
+- [ ] **Session-scoped tokens for QR codes** — Currently the host's long-lived API key is embedded in every QR code / pairing URI. Replace with a short-lived, session-scoped token that the relay accepts only for that session. Prevents key leakage via QR photography or screenshot sharing.
+- [ ] **Default API key expiration** — Keys are created with no expiry. Add a default TTL (e.g. 90 days) at creation. CLI should warn when approaching expiry and support `terminal-relay auth rotate`.
 - [ ] Add `status` field to `ApiKey` model (`active`, `inactive`, `revoked`). Inactive keys still validate but signal the client to rotate.
 - [ ] `POST /api/keys/rotate` endpoint + CLI auto-rotation. Scheduled job to transition keys by age.
 - [ ] HMAC secret rotation procedure: new secret → deploy → grace period → drop old.
