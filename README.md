@@ -165,8 +165,8 @@ The relay server enforces several defensive measures even though it never sees p
 
 | Environment | Relay URL                               | Use case                   |
 | ----------- | --------------------------------------- | -------------------------- |
-| Production  | `wss://relay.terminal-relay.dev/ws`     | End users                  |
-| Development | `wss://dev-relay.terminal-relay.dev/ws` | Beta testers               |
+| Production  | `wss://terminal-relay.fly.dev/ws`       | End users                  |
+| Development | `wss://dev-relay.terminal-relay.dev/ws` | Beta testers (coming soon) |
 | Local       | `ws://localhost:8080/ws`                | Contributors / self-hosted |
 
 The relay URL defaults to production. Override with `TERMINAL_RELAY_URL` env var for development or self-hosted use.
