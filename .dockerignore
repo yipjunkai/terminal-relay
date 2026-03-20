@@ -1,0 +1,18 @@
+# Build artifacts
+target/
+
+# Version control
+.git/
+.gitignore
+.github/
+
+# Docs
+*.md
+LICENSE-*
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/

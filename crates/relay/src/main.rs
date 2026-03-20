@@ -11,7 +11,7 @@ use tracing::info;
 use crate::relay::{RelayState, health_handler, ws_handler};
 
 #[derive(Debug, Parser)]
-#[command(name = "terminal-relay-server")]
+#[command(name = "relay")]
 #[command(about = "Zero-knowledge relay server for terminal-relay")]
 struct Args {
     #[arg(long, default_value = "0.0.0.0:8080")]
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,terminal_relay_server=debug".into()),
+                .unwrap_or_else(|_| "info,relay=debug".into()),
         )
         .init();
 

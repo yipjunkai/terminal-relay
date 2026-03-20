@@ -12,7 +12,7 @@ use semver::Version;
 use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, info, warn};
 
-use terminal_relay_core::protocol::{
+use protocol::protocol::{
     PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerRole, PeerStatus, RegisterRequest,
     RegisterResponse, RelayError, RelayMessage, RelayRoute, decode_relay, encode_relay,
 };

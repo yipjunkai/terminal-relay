@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
 
-use terminal_relay_core::protocol::{
+use protocol::protocol::{
     RegisterRequest, RegisterResponse, RelayMessage, decode_relay, encode_relay,
 };
 

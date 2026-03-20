@@ -27,6 +27,7 @@ Items are roughly ordered by priority within each phase.
 - [x] Implement version range negotiation: client sends `protocol_version` (max) and `protocol_version_min`, server selects highest mutually supported version and returns `negotiated_protocol_version`. Bumped to protocol v2, supporting v1-v2.
 - [x] Send `SessionEnded { exit_code }` to the attached client when the PTY child exits. Attach side displays the exit code.
 - [x] Switch wire format from bincode to MessagePack (`rmp-serde`) for cross-platform client compatibility (Swift, Kotlin, JS).
+- [x] Switch MessagePack encoding to `rmp_serde::to_vec_named` (named map keys) for cross-platform decoding compatibility. Decoding (`from_slice`) accepts both named and positional formats.
 - [x] Add `opencode` to tool detection list.
 - [x] Add `--command` flag for running arbitrary commands (e.g. `--command opencode`).
 - [x] Fix PTY to inherit current working directory instead of defaulting to `$HOME`.
@@ -34,21 +35,106 @@ Items are roughly ordered by priority within each phase.
 - [x] Attach client cleanly exits on `SessionEnded` or host going offline, with "Press enter to exit" prompt.
 - [x] Clear attach screen on handshake confirm and send immediate resize so host PTY renders at correct dimensions.
 
-## Phase 4: Relay deployment (pre-native-app)
+## Phase 4: Relay deployment (in progress)
 
-- [ ] Deploy the relay server to a cloud provider (Fly.io, Railway, or similar). Set up `wss://relay.terminal-relay.dev/ws` for production.
-- [ ] Add TLS termination (via reverse proxy or native rustls) for the production relay.
+- [x] Deploy the relay server to Fly.io. Added `Dockerfile` (multi-stage Rust build with dependency caching), `fly.toml` (auto-TLS, health checks, auto-suspend), and `.dockerignore`.
+- [x] TLS termination via Fly.io's built-in proxy (`force_https: true`). No reverse proxy or native rustls needed.
+- [x] Add `.env` file support to the CLI via `dotenvy` for dev/staging relay URL configuration.
+- [x] Add `rustls` with `ring` crypto backend to fix TLS provider initialization for WebSocket connections.
+- [ ] Set up custom domain: CNAME `relay.terminal-relay.dev` to Fly app for production relay URL.
 - [ ] Set up a development relay at `wss://dev-relay.terminal-relay.dev/ws` for beta testing.
 
-## Phase 5: Native mobile apps
+## Phase 5: Mobile app (in progress)
 
-- [ ] Build native iOS app (Swift) with terminal rendering, QR/URI pairing, E2E encryption (CryptoKit X25519 + AES-GCM), and bidirectional input.
-- [ ] Add speech-to-code on iOS: on-device Speech framework recognition that converts voice commands into coding actions (refactor, commit, debug) sent as encrypted `VoiceCommand` messages to the host session.
-- [ ] Build native Android app (Kotlin) with the same terminal + encryption + pairing functionality.
-- [ ] Add speech-to-code on Android using on-device ML Kit speech recognition.
-- [ ] Add push notifications via APNS (iOS) and FCM (Android) for session events (peer connected, session ended, tool output idle).
-- [ ] Generate shareable web URLs (e.g. `https://terminal-relay.dev/s/<token>`) that open the app or fall back to a web client with pairing info embedded.
+Pivoted from separate native iOS/Android apps to a single Flutter app (`terminal_relay_app`) targeting both platforms. Native platform channels will be used for speech recognition and push notifications. Production-quality release build on Android with E2E encrypted terminal mirroring, auto-reconnect, explicit state machine, terminal toolbar, deep links, and app lifecycle handling. 58 tests passing.
+
+### Core functionality (complete)
+
+- [x] Build Flutter app with terminal rendering (`xterm.dart`), QR code scanning (`mobile_scanner`), and manual URI paste pairing.
+- [x] Implement full E2E encryption in Dart: X25519 key exchange, HKDF-SHA256 key derivation, AES-256-GCM encrypt/decrypt, HMAC-SHA256 handshake confirmation. Wire-compatible with Rust implementation.
+- [x] Implement MessagePack protocol codec in Dart for all message types (RelayMessage, PeerFrame, SecureMessage). Forward-compatible with `Unknown` fallback.
+- [x] Implement WebSocket relay client with registration, heartbeat pings, and message buffering to prevent race conditions during handshake.
+- [x] Implement `termrelay://` deep link URI parsing for QR code pairing.
+- [x] Mobile client sends encrypted `SessionEnded` on graceful disconnect.
+- [x] Connection status bar with state indicator (connecting, handshaking, E2E encrypted, error).
+- [x] Reconnect button in status bar when connection is lost.
+
+### Relay client (complete)
+
+- [x] Replace custom message buffering with callback-based architecture. Registration handled internally.
+- [x] Add automatic reconnect with exponential backoff (1s to 30s, max 10 attempts).
+- [x] Add WebSocket ping/pong keepalive via `IOWebSocketChannel` with `pingInterval = 15s`.
+- [x] Add connection timeout handling (15s on WebSocket connect and registration).
+- [x] Handle app lifecycle: pause heartbeats when backgrounded, reconnect immediately when foregrounded.
+- [x] Add proper close/dispose lifecycle with intentional-close and disposed flags.
+
+### Session state machine (complete)
+
+- [x] Rewrite `RelaySession` as explicit state machine with 8 states: `disconnected -> connecting -> waitingForPeer -> handshaking -> awaitingConfirm -> connected`, plus `reconnecting` and `error`.
+- [x] Fix handshake race condition with frame queue. All frames during async key derivation are queued and processed sequentially.
+- [x] Add handshake timeout (15s across `waitingForPeer`, `handshaking`, and `awaitingConfirm`).
+
+### Deep links (complete)
+
+- [x] Register `termrelay://` scheme handler on Android (intent filter in AndroidManifest.xml + MainActivity.kt MethodChannel).
+- [x] Register `termrelay://` scheme handler on iOS (CFBundleURLTypes in Info.plist).
+- [x] Route handler in main.dart: checks initial link on cold start, listens for links on warm start, navigates directly to terminal screen.
+
+### UI (complete)
+
+- [x] Terminal toolbar with Ctrl keys (C, D, Z, L, A, E, R, W), Tab, Esc, arrow keys, Paste, and common symbols. Toggleable, haptic feedback, horizontally scrollable rows.
+- [x] Home screen with session history, reconnect options.
+- [x] Camera permission error handling with specific messages and retry button.
+- [x] Error states show message and reconnect action.
+
+### Session & protocol improvements
+
+- [ ] Handle the dual-handshake pattern correctly. Both sides send Handshake simultaneously; client should process the first and ignore duplicates rather than resetting state.
+- [ ] Add session resumption: after reconnect, re-establish the secure channel without a full handshake if the relay accepted the resume token.
 - [ ] Add `protocol_version` to the peer-to-peer `Handshake` struct so peers can compare versions and send `VersionNotice` to prompt updates on older clients.
+- [ ] Generate shareable web URLs (e.g. `https://terminal-relay.dev/s/<token>`) that open the app or fall back to a web client with pairing info embedded.
+- [ ] Add host liveness check for the home screen: add a relay HTTP endpoint (e.g. `GET /session/:id/status`) that returns whether the host is currently connected, so the app can show live/offline status on saved sessions without opening a WebSocket.
+- [ ] Add E2E heartbeat-based liveness detection during active sessions: host sends periodic `SecureMessage::Heartbeat` (e.g. every 30s), mobile client tracks last received message time and shows "host may be unresponsive" if no data arrives within a timeout (e.g. 90s). Proves the host application layer is healthy, not just the WebSocket.
+
+### Crypto hardening
+
+- [ ] Verify constant-time MAC comparison actually works in Dart. Consider using a crypto library's built-in compare.
+- [ ] Handle key material cleanup: null out key references when the session ends.
+
+### Configuration
+
+- [ ] Move hardcoded relay URL to `.env` / environment config instead of being embedded in Dart source. Add `.env.example` for the mobile app.
+
+### UI / UX improvements
+
+- [ ] Add a reconnect overlay when connection drops (error message with reconnect/close buttons instead of just a small icon).
+- [ ] Support landscape orientation for more terminal columns.
+- [ ] Validate pairing URI before navigating (check that the relay URL is reachable).
+- [ ] Support scanning from photo gallery (screenshot of QR code).
+- [ ] Add global error boundary that catches unhandled exceptions and shows a recovery screen.
+- [ ] Surface crypto errors clearly: "Fingerprint mismatch" should explain what it means and what to do.
+- [ ] Add a settings screen: default relay URL, terminal font size, theme (dark/light/custom), haptic feedback toggle. Persist with `shared_preferences`.
+- [ ] Show session metadata: host fingerprint, connection duration, data transferred.
+- [ ] Polish terminal rendering: font selection, theme customization.
+
+### Features
+
+- [ ] Add speech-to-code: on-device speech recognition (platform channels to iOS Speech framework / Android ML Kit) that sends `VoiceCommand` messages to the host.
+- [ ] Add push notifications via APNS (iOS) and FCM (Android) for session events (peer connected, session ended, tool output idle).
+
+### Testing
+
+- [ ] Update widget test: app launches to home screen.
+- [ ] Add widget tests for terminal screen and status bar states.
+- [ ] Add integration test: mock WebSocket server that replays a captured Rust handshake sequence, verify the Dart client completes handshake and decrypts output.
+
+### Build / Release
+
+- [ ] Replace `debugPrint` with a proper logging system stripped in release builds (use `kReleaseMode` checks or a log framework).
+- [ ] Set up app signing for Android (keystore) for Play Store distribution.
+- [ ] Set up app signing for iOS (provisioning profiles, certificates).
+- [ ] App store preparation: icons, splash screen, screenshots, store listings.
+- [ ] Set up CI (GitHub Actions) for building and testing on push.
 
 ## Phase 6: Web client (deferred)
 

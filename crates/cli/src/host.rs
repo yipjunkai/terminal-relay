@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use terminal_relay_core::{
+use protocol::{
     crypto::{
         HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys,
         fingerprint, generate_key_pair,
@@ -209,6 +209,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                                     Some(identity.tool_name.clone()),
                                 )?;
                             } else {
+                                info!(session_id = %identity.session_id, "client disconnected, awaiting reconnect");
                                 chan.reset();
                             }
                         }
@@ -349,7 +350,7 @@ fn handle_route(
             }
 
             let notice =
-                SecureMessage::Notification(terminal_relay_core::protocol::PushNotification {
+                SecureMessage::Notification(protocol::protocol::PushNotification {
                     title: format!("Connected to {}", id.tool_name),
                     body: "Session encryption established".to_string(),
                 });
@@ -400,7 +401,7 @@ async fn connect_host(
     resume_token: Option<String>,
 ) -> anyhow::Result<(
     RelayConnection,
-    terminal_relay_core::protocol::RegisterResponse,
+    protocol::protocol::RegisterResponse,
 )> {
     RelayConnection::connect(
         relay_url,
@@ -427,7 +428,7 @@ async fn reconnect_host(
     resume_token: &str,
 ) -> anyhow::Result<(
     RelayConnection,
-    terminal_relay_core::protocol::RegisterResponse,
+    protocol::protocol::RegisterResponse,
 )> {
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=MAX_RECONNECT_ATTEMPTS {

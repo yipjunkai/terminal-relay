@@ -1,5 +1,5 @@
 [package]
-name = "terminal-relay-server"
+name = "relay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,4 +20,4 @@ tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "ti
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.8", features = ["v4"] }
-terminal-relay-core = { path = "../terminal-relay-core" }
+protocol = { path = "../protocol" }

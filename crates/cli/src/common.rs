@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
-use terminal_relay_core::{
+use protocol::{
     crypto::SecureChannel,
     protocol::{Handshake, PeerFrame, RelayMessage, RelayRoute, encode_peer_frame},
 };

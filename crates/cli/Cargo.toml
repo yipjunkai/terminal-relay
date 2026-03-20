@@ -1,5 +1,5 @@
 [package]
-name = "terminal-relay-cli"
+name = "cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -40,7 +40,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 which = "8.0"
 zeroize = "1.8"
-terminal-relay-core = { path = "../terminal-relay-core" }
+protocol = { path = "../protocol" }
 
 [dev-dependencies]
 tempfile = "3.15"
