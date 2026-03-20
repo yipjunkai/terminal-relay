@@ -240,6 +240,18 @@ async fn handle_route(
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
         PeerFrame::Handshake(handshake) => {
+            // Ignore duplicate handshakes if we already have a channel
+            // (in-progress or confirmed). This handles the dual-handshake
+            // race where both sides send Handshake simultaneously — the
+            // first one processed wins, and the second is safely dropped.
+            if chan.channel.is_some() {
+                info!(
+                    confirmed = chan.confirmed,
+                    "ignoring duplicate handshake, channel already established"
+                );
+                return Ok(RouteAction::Continue);
+            }
+
             // Validate handshake timestamp to reject stale/replayed messages.
             let now = now_millis();
             let age = now.saturating_sub(handshake.timestamp_ms);
