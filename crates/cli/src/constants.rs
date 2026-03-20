@@ -1,5 +1,5 @@
 /// Production relay server URL. Users connect here by default.
-pub const DEFAULT_RELAY_URL: &str = "wss://relay.terminal-relay.dev/ws";
+pub const DEFAULT_RELAY_URL: &str = "wss://terminal-relay.fly.dev/ws";
 
 /// Environment variable name to override the relay URL.
 pub const RELAY_URL_ENV: &str = "TERMINAL_RELAY_URL";
