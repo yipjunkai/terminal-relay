@@ -177,6 +177,7 @@ API keys are **self-validating signed tokens** so the relay can verify them loca
 **Key format:** `tr_<base64url(payload_json + "." + HMAC-SHA256(payload_json, HMAC_SECRET))>` where payload = `{ uid, kid, tier, iat }`. The relay shares the same `HMAC_SECRET` with the control API and can verify + decode any key in microseconds with no database or HTTP calls.
 
 **Connection flow:**
+
 1. CLI/mobile connects directly to the relay: `wss://relay.../ws?api_key=tr_...`.
 2. Relay decodes the key, verifies the HMAC signature, extracts `user_id` and `tier`.
 3. Relay checks the in-memory revocation set (synced periodically from the control API).
@@ -194,11 +195,12 @@ API keys are **self-validating signed tokens** so the relay can verify them loca
 
 - [x] Add a helpful error message when connecting to the hosted relay without an API key. CLI blocks with clear instructions before attempting connection. Also catches 401/403 from the relay and suggests re-authenticating.
 - [ ] Add periodic relay heartbeat (`POST /internal/heartbeat { active_sessions }`) so control API can detect and reconcile stale sessions from relay crashes.
-- [ ] Remove the WebSocket proxy from the control API once signed key flow is validated end-to-end.
+- [x] Remove the WebSocket proxy from the control API. Signed key flow is live in production. Removed `relay-proxy/` module, `@fastify/websocket` and `ws` dependencies, and WebSocket registration from `main.ts`.
 - [x] Add `terminal-relay auth` CLI command: consolidates registration (`--email`) and login (`--api-key`) into a single entry point. Stores signed API key in `~/.terminal-relay/config.toml`. Also added `terminal-relay logout` and `terminal-relay status`.
 - [x] Update pairing URI to include `api_key` so mobile app connects through the same authenticated path. Added `api_key` field to `PairingUri` struct, serialized as `&key=` param.
 - [x] Update `relay_client.rs` to append `?api_key=` to WebSocket URL when a key is available. Host reads key from CLI arg → env var → config file. Attach reads key from pairing URI.
 - [x] Add tests for signed key generation/verification (control API: 14 tests) and HMAC verification/revocation (relay auth.rs: 20 tests). Covers roundtrip, tampered payload/signature, wrong secret, revocation, dual-secret rotation, malformed input, constant-time comparison, and cross-platform compatibility.
+
 #### Key lifecycle and secret rotation (planned)
 
 Two-layer rotation strategy inspired by Infisical's active/inactive/revoked model. User-level key rotation and infra-level HMAC secret rotation work together — regular key rotation at the user level ensures all active keys are re-signed before an old HMAC secret is dropped.
