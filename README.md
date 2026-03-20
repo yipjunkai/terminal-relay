@@ -63,11 +63,11 @@ Auto-detected in order of priority:
 
 ## What this repo includes
 
-- `terminal-relay-cli`: the user-facing binary (`terminal-relay`)
-- `terminal-relay-server`: the hosted relay service (users never run this)
-- `terminal-relay-core`: shared protocol, crypto, and pairing primitives
+- `cli`: the user-facing binary (`terminal-relay`)
+- `relay`: the zero-knowledge relay server
+- `protocol`: shared protocol, crypto, and pairing primitives
 
-Native iOS (Swift) and Android (Kotlin) apps are planned as the primary mobile clients, with speech-to-code support for hands-free interaction with your AI tools.
+A Flutter mobile app (iOS + Android) is available separately as the primary mobile client, with speech-to-code support for hands-free interaction with your AI tools.
 
 ## Security
 
@@ -175,13 +175,13 @@ All WebSocket messages are MessagePack-encoded across three layers:
 
 ```bash
 # Run the relay server locally
-cargo run -p terminal-relay-server -- --bind 0.0.0.0:8080
+cargo run -p relay -- --bind 0.0.0.0:8080
 
 # Run the CLI against local relay
-cargo run -p terminal-relay-cli -- start --relay-url ws://127.0.0.1:8080/ws --tool auto
+cargo run -p cli -- start --relay-url ws://127.0.0.1:8080/ws --tool auto
 
 # Attach from another terminal
-cargo run -p terminal-relay-cli -- attach --pairing-uri "termrelay://pair?..."
+cargo run -p cli -- attach --pairing-uri "termrelay://pair?..."
 ```
 
 ## License
