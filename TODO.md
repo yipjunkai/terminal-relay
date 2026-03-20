@@ -192,7 +192,7 @@ API keys are **self-validating signed tokens** so the relay can verify them loca
 
 #### Remaining
 
-- [ ] Add a helpful error message when connecting to the hosted relay without an API key. If `api_key` is `None` and the relay URL is the production default, print: `"No API key found. Run 'terminal-relay auth' to authenticate."` instead of a cryptic connection failure.
+- [x] Add a helpful error message when connecting to the hosted relay without an API key. CLI blocks with clear instructions before attempting connection. Also catches 401/403 from the relay and suggests re-authenticating.
 - [ ] Add periodic relay heartbeat (`POST /internal/heartbeat { active_sessions }`) so control API can detect and reconcile stale sessions from relay crashes.
 - [ ] Remove the WebSocket proxy from the control API once signed key flow is validated end-to-end.
 - [x] Add `terminal-relay auth` CLI command: consolidates registration (`--email`) and login (`--api-key`) into a single entry point. Stores signed API key in `~/.terminal-relay/config.toml`. Also added `terminal-relay logout` and `terminal-relay status`.
@@ -224,7 +224,7 @@ The HMAC secret used to sign API keys needs periodic rotation. The relay support
 
 #### Remaining
 
-- [ ] Add rate limiting per API key (sessions/hour, bytes/day) with configurable tiers. Free tier gets stricter limits.
+- [x] Add per-user session rate limiting based on API key tier. Relay tracks active sessions per `user_id` in memory (similar to IP tracking). Limits enforced on WebSocket upgrade before connection: free tier = 3 concurrent sessions (default), pro = 20. Configurable via `--tier-limit-free` / `--tier-limit-pro` CLI args or `RELAY_TIER_LIMIT_FREE` / `RELAY_TIER_LIMIT_PRO` env vars. Session counts cleaned up on disconnect and session expiry. Returns HTTP 429 with clear message when limit is hit.
 - [ ] Add anonymous access mode: no API key required but subject to aggressive per-IP limits (e.g. 2 sessions, 1 hour TTL). Encourages sign-up without blocking first-time users.
 - [ ] Add billing integration: enforce plan limits (session count, concurrent sessions, bandwidth) and return clear errors when exceeded.
 

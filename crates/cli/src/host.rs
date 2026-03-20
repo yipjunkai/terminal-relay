@@ -73,6 +73,14 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
             .and_then(|c| c.api_key)
     });
 
+    // Warn if connecting to the production relay without an API key
+    if api_key.is_none() && args.relay_url == crate::constants::DEFAULT_RELAY_URL {
+        eprintln!("Warning: No API key found. The hosted relay requires authentication.");
+        eprintln!("Run `terminal-relay auth --email <your-email>` to register, or");
+        eprintln!("    `terminal-relay auth --api-key <key>` to log in.\n");
+        return Err(anyhow::anyhow!("authentication required"));
+    }
+
     run_single_host_session(HostSessionParams {
         tool_name: tool.name,
         command: tool.command,

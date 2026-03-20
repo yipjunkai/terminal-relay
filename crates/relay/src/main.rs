@@ -40,6 +40,12 @@ struct Args {
     /// Shared secret for authenticating with the control API internal endpoints.
     #[arg(long, default_value = "", env = "INTERNAL_SECRET")]
     internal_secret: String,
+    /// Maximum concurrent sessions for free-tier users (0 = unlimited).
+    #[arg(long, default_value_t = 3, env = "RELAY_TIER_LIMIT_FREE")]
+    tier_limit_free: usize,
+    /// Maximum concurrent sessions for pro-tier users (0 = unlimited).
+    #[arg(long, default_value_t = 20, env = "RELAY_TIER_LIMIT_PRO")]
+    tier_limit_pro: usize,
 }
 
 #[tokio::main]
@@ -68,11 +74,17 @@ async fn main() -> anyhow::Result<()> {
         },
     ));
 
+    let tier_limits = relay::TierLimits {
+        free: args.tier_limit_free,
+        pro: args.tier_limit_pro,
+    };
+
     let state = Arc::new(RelayState::new(
         args.min_version.clone(),
         Duration::from_secs(args.session_ttl_secs),
         args.max_sessions,
         args.max_sessions_per_ip,
+        tier_limits,
         Arc::clone(&auth),
     ));
 

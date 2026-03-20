@@ -51,6 +51,8 @@ struct SessionSlot {
     failed_pairing_attempts: u32,
     /// IP address of the host that created this session (for per-IP limits).
     host_ip: Option<IpAddr>,
+    /// User ID of the host (from API key payload, for per-user limits).
+    host_user_id: Option<String>,
 }
 
 impl SessionSlot {
@@ -62,6 +64,7 @@ impl SessionSlot {
             last_activity: Instant::now(),
             failed_pairing_attempts: 0,
             host_ip: None,
+            host_user_id: None,
         }
     }
 
@@ -80,16 +83,33 @@ impl SessionSlot {
     }
 }
 
+/// Per-tier session limits. Configurable via CLI args.
+#[derive(Debug, Clone)]
+pub struct TierLimits {
+    pub free: usize,
+    pub pro: usize,
+}
+
+impl Default for TierLimits {
+    fn default() -> Self {
+        Self { free: 3, pro: 20 }
+    }
+}
+
 pub struct RelayState {
     sessions: DashMap<String, SessionSlot>,
     /// Tracks how many sessions each IP address owns (as host).
     ip_sessions: DashMap<IpAddr, usize>,
+    /// Tracks how many sessions each user owns (by user ID from API key).
+    user_sessions: DashMap<String, usize>,
     min_version: Version,
     session_ttl: Duration,
     /// Maximum total concurrent sessions (0 = unlimited).
     pub max_sessions: usize,
     /// Maximum concurrent sessions per IP (0 = unlimited).
     pub max_sessions_per_ip: usize,
+    /// Per-tier session limits.
+    tier_limits: TierLimits,
     /// Auth state for API key verification and control API communication.
     auth: Arc<AuthState>,
 }
@@ -100,22 +120,71 @@ impl RelayState {
         session_ttl: Duration,
         max_sessions: usize,
         max_sessions_per_ip: usize,
+        tier_limits: TierLimits,
         auth: Arc<AuthState>,
     ) -> Self {
         let parsed_version = Version::parse(&min_version).unwrap_or_else(|_| Version::new(0, 1, 0));
         Self {
             sessions: DashMap::new(),
             ip_sessions: DashMap::new(),
+            user_sessions: DashMap::new(),
             min_version: parsed_version,
             session_ttl,
             max_sessions,
             max_sessions_per_ip,
+            tier_limits,
             auth,
         }
     }
 
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Get the session limit for a tier.
+    fn tier_limit(&self, tier: &str) -> usize {
+        match tier {
+            "pro" => self.tier_limits.pro,
+            _ => self.tier_limits.free, // "free" and any unknown tier
+        }
+    }
+
+    /// Check whether a new session from this user is allowed.
+    fn check_user_limit(&self, user_id: &str, tier: &str) -> Result<(), String> {
+        let limit = self.tier_limit(tier);
+        if limit == 0 {
+            return Ok(()); // unlimited
+        }
+        let count = self.user_sessions.get(user_id).map(|v| *v).unwrap_or(0);
+        if count >= limit {
+            warn!(
+                %user_id,
+                %tier,
+                current = count,
+                max = limit,
+                "per-user session limit reached"
+            );
+            return Err(format!(
+                "session limit reached ({count}/{limit} for {tier} tier). Upgrade your plan for more sessions."
+            ));
+        }
+        Ok(())
+    }
+
+    /// Increment the user session counter.
+    fn track_user(&self, user_id: &str) {
+        *self.user_sessions.entry(user_id.to_string()).or_insert(0) += 1;
+    }
+
+    /// Decrement the user session counter.
+    fn untrack_user(&self, user_id: &str) {
+        if let Some(mut count) = self.user_sessions.get_mut(user_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                drop(count);
+                self.user_sessions.remove(user_id);
+            }
+        }
     }
 
     /// Check whether a new session from this IP is allowed.
@@ -178,9 +247,12 @@ impl RelayState {
                             let _ = sender.send(expiry_msg.clone());
                         }
                     }
-                    // Clean up IP tracking for expired sessions.
+                    // Clean up IP and user tracking for expired sessions.
                     if let Some(ip) = session.host_ip {
                         self.untrack_ip(ip);
+                    }
+                    if let Some(ref user_id) = session.host_user_id {
+                        self.untrack_user(user_id);
                     }
                 }
                 keep
@@ -485,6 +557,11 @@ pub async fn ws_handler(
 
         match state.auth.verify_api_key(&api_key).await {
             Some(payload) => {
+                // Check per-user session limit before upgrading
+                if let Err(msg) = state.check_user_limit(&payload.uid, &payload.tier) {
+                    return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
+                }
+
                 info!(
                     user_id = %payload.uid,
                     key_id = %payload.kid,
@@ -566,6 +643,17 @@ async fn handle_socket(
             return;
         }
     };
+
+    // Track per-user session count (host role only, since hosts create sessions)
+    if register_request.role == PeerRole::Host {
+        if let Some(ref payload) = api_key_payload {
+            state.track_user(&payload.uid);
+            // Store user_id on the session slot for cleanup
+            if let Some(mut session) = state.sessions.get_mut(&register_request.session_id) {
+                session.host_user_id = Some(payload.uid.clone());
+            }
+        }
+    }
 
     let registered_message = RelayMessage::Registered(register_response.clone());
     if send_wire(&mut sink, &registered_message).await.is_err() {
@@ -656,6 +744,13 @@ async fn handle_socket(
 
     state.set_disconnected(&register_request.session_id, register_request.role);
     state.notify_peer_status(&register_request.session_id, register_request.role, false);
+
+    // Untrack per-user session count
+    if register_request.role == PeerRole::Host {
+        if let Some(ref payload) = api_key_payload {
+            state.untrack_user(&payload.uid);
+        }
+    }
 
     let duration_ms = connected_at.elapsed().as_millis() as u64;
     info!(
