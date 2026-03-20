@@ -89,8 +89,8 @@ Pivoted from separate native iOS/Android apps to a single Flutter app (`terminal
 
 ### Session & protocol improvements
 
-- [ ] Handle the dual-handshake pattern correctly. Both sides send Handshake simultaneously; client should process the first and ignore duplicates rather than resetting state.
-- [ ] Add session resumption: after reconnect, re-establish the secure channel without a full handshake if the relay accepted the resume token.
+- [x] Handle the dual-handshake pattern correctly. Both sides send Handshake simultaneously; first handshake wins, duplicates ignored. Fixed in host.rs, attach.rs, and session.dart.
+- [x] Add scrollback buffer (128KB) on the host that replays recent PTY output to reconnecting clients after handshake confirm. Preserves forward secrecy (full handshake with fresh keys on every reconnect).
 - [ ] Add `protocol_version` to the peer-to-peer `Handshake` struct so peers can compare versions and send `VersionNotice` to prompt updates on older clients.
 - [ ] Generate shareable web URLs (e.g. `https://terminal-relay.dev/s/<token>`) that open the app or fall back to a web client with pairing info embedded.
 - [ ] Add host liveness check for the home screen: add a relay HTTP endpoint (e.g. `GET /session/:id/status`) that returns whether the host is currently connected, so the app can show live/offline status on saved sessions without opening a WebSocket.
@@ -98,12 +98,12 @@ Pivoted from separate native iOS/Android apps to a single Flutter app (`terminal
 
 ### Crypto hardening
 
-- [ ] Verify constant-time MAC comparison actually works in Dart. Consider using a crypto library's built-in compare.
-- [ ] Handle key material cleanup: null out key references when the session ends.
+- [x] Verify constant-time MAC comparison actually works in Dart. Consolidated into `constantTimeMacEqual()` helper in crypto.dart, used by both `verifyHandshakeMac()` and `_onPeerConfirm()`.
+- [x] Handle key material cleanup: `SecureChannel.dispose()` zeros TX/RX keys, `RelaySession.disconnect()`/`dispose()` zeros ephemeral key pair via `zeroOut()` helper.
 
 ### Configuration
 
-- [ ] Move hardcoded relay URL to `.env` / environment config instead of being embedded in Dart source. Add `.env.example` for the mobile app.
+- [x] Relay URL is already dynamic — received from the pairing URI at runtime, not hardcoded in Dart source. No `.env` needed.
 
 ### UI / UX improvements
 
@@ -130,7 +130,7 @@ Pivoted from separate native iOS/Android apps to a single Flutter app (`terminal
 
 ### Build / Release
 
-- [ ] Replace `debugPrint` with a proper logging system stripped in release builds (use `kReleaseMode` checks or a log framework).
+- [x] Replace `debugPrint` with `log()` wrapper (core/log.dart) guarded by `kDebugMode`. All 35 calls stripped in release builds.
 - [ ] Set up app signing for Android (keystore) for Play Store distribution.
 - [ ] Set up app signing for iOS (provisioning profiles, certificates).
 - [ ] App store preparation: icons, splash screen, screenshots, store listings.
@@ -146,10 +146,20 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 ## Hosted relay service (ongoing)
 
 - [x] Hardcode the production relay URL into the CLI binary so users never configure it. Support environment-based URL selection (production, development, local) via env var (`TERMINAL_RELAY_URL`).
-- [ ] Add authn/authz and tenant isolation for the hosted relay (API keys, account system, or anonymous with rate limits).
-- [ ] Add a maximum session count and per-IP session limits on the relay to prevent abuse.
+- [x] Add a maximum session count and per-IP session limits on the relay to prevent abuse. Configurable via `--max-sessions` / `RELAY_MAX_SESSIONS` and `--max-sessions-per-ip` / `RELAY_MAX_SESSIONS_PER_IP`. Defaults to unlimited (0). IP tracking cleaned up on session expiry.
 - [x] Enrich the `/healthz` endpoint to return structured JSON with session count and server version. _(Done in Phase 2.)_
 - [ ] Add multi-region relay support with geo-routing so clients connect to the nearest relay for lower latency.
+
+### Control API gateway (planned)
+
+Authentication and billing belong in the control API (`control/`), not in the open-source relay. The relay stays a simple dumb pipe; the control API sits in front of the hosted relay as a gateway.
+
+- [ ] Add WebSocket proxy endpoint in control API that validates API keys before upgrading and forwarding to the relay. CLI and mobile app include `api_key` in the pairing URI; the proxy strips it before forwarding.
+- [ ] Add API key management endpoints: `POST /api/keys` (create), `GET /api/keys` (list), `DELETE /api/keys/:id` (revoke). Keys tied to `User` model via Prisma.
+- [ ] Add usage metering in the proxy: track bytes relayed, session duration, and connection count per user. Write to the existing `Usage` table.
+- [ ] Add rate limiting per API key (sessions/hour, bytes/day) with configurable tiers. Free tier gets stricter limits.
+- [ ] Add anonymous access mode: no API key required but subject to aggressive per-IP limits (e.g. 2 sessions, 1 hour TTL). Encourages sign-up without blocking first-time users.
+- [ ] Add billing integration: enforce plan limits (session count, concurrent sessions, bandwidth) and return clear errors when exceeded.
 
 ## User experience
 
@@ -180,7 +190,7 @@ Lower priority since native apps are the primary mobile strategy. Web client ser
 - [ ] Replace `mpsc::unbounded_channel` in `RelayConnection` with a bounded channel to add backpressure.
 - [ ] Increase the PTY read buffer from 4096 to 16384+ bytes to reduce per-frame overhead.
 - [ ] Cache the last-sent terminal size on the attach side and only send `Resize` when it actually changes.
-- [ ] Add a circular scrollback buffer on the host (e.g. last 100KB) so clients reconnecting mid-session get caught up with recent output.
+- [x] Add a circular scrollback buffer on the host (128KB) so clients reconnecting mid-session get caught up with recent output. Replayed after handshake confirm, before the handshake-window backlog.
 
 ## Code quality
 

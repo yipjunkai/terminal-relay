@@ -1,8 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use axum::{
     Json,
-    extract::{State, WebSocketUpgrade, ws::Message},
+    extract::{ConnectInfo, State, WebSocketUpgrade, ws::Message},
     response::IntoResponse,
 };
 use dashmap::DashMap;
@@ -46,6 +46,8 @@ struct SessionSlot {
     client: PeerSlot,
     last_activity: Instant,
     failed_pairing_attempts: u32,
+    /// IP address of the host that created this session (for per-IP limits).
+    host_ip: Option<IpAddr>,
 }
 
 impl SessionSlot {
@@ -56,6 +58,7 @@ impl SessionSlot {
             client: PeerSlot::new(),
             last_activity: Instant::now(),
             failed_pairing_attempts: 0,
+            host_ip: None,
         }
     }
 
@@ -76,22 +79,79 @@ impl SessionSlot {
 
 pub struct RelayState {
     sessions: DashMap<String, SessionSlot>,
+    /// Tracks how many sessions each IP address owns (as host).
+    ip_sessions: DashMap<IpAddr, usize>,
     min_version: Version,
     session_ttl: Duration,
+    /// Maximum total concurrent sessions (0 = unlimited).
+    max_sessions: usize,
+    /// Maximum concurrent sessions per IP (0 = unlimited).
+    max_sessions_per_ip: usize,
 }
 
 impl RelayState {
-    pub fn new(min_version: String, session_ttl: Duration) -> Self {
+    pub fn new(
+        min_version: String,
+        session_ttl: Duration,
+        max_sessions: usize,
+        max_sessions_per_ip: usize,
+    ) -> Self {
         let parsed_version = Version::parse(&min_version).unwrap_or_else(|_| Version::new(0, 1, 0));
         Self {
             sessions: DashMap::new(),
+            ip_sessions: DashMap::new(),
             min_version: parsed_version,
             session_ttl,
+            max_sessions,
+            max_sessions_per_ip,
         }
     }
 
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Check whether a new session from this IP is allowed.
+    fn check_limits(&self, ip: IpAddr) -> Result<(), String> {
+        if self.max_sessions > 0 && self.sessions.len() >= self.max_sessions {
+            warn!(
+                current = self.sessions.len(),
+                max = self.max_sessions,
+                "global session limit reached"
+            );
+            return Err("server at capacity, try again later".into());
+        }
+
+        if self.max_sessions_per_ip > 0 {
+            let count = self.ip_sessions.get(&ip).map(|v| *v).unwrap_or(0);
+            if count >= self.max_sessions_per_ip {
+                warn!(
+                    %ip,
+                    current = count,
+                    max = self.max_sessions_per_ip,
+                    "per-IP session limit reached"
+                );
+                return Err("too many sessions from this IP".into());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Increment the IP session counter.
+    fn track_ip(&self, ip: IpAddr) {
+        *self.ip_sessions.entry(ip).or_insert(0) += 1;
+    }
+
+    /// Decrement the IP session counter.
+    fn untrack_ip(&self, ip: IpAddr) {
+        if let Some(mut count) = self.ip_sessions.get_mut(&ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                drop(count);
+                self.ip_sessions.remove(&ip);
+            }
+        }
     }
 
     pub async fn cleanup_loop(self: Arc<Self>) {
@@ -110,6 +170,10 @@ impl RelayState {
                         if let Some(sender) = &slot.sender {
                             let _ = sender.send(expiry_msg.clone());
                         }
+                    }
+                    // Clean up IP tracking for expired sessions.
+                    if let Some(ip) = session.host_ip {
+                        self.untrack_ip(ip);
                     }
                 }
                 keep
@@ -133,6 +197,7 @@ impl RelayState {
         &self,
         request: &RegisterRequest,
         sender: mpsc::UnboundedSender<RelayMessage>,
+        ip: IpAddr,
     ) -> Result<RegisterResponse, String> {
         validate_register_request(request)?;
 
@@ -154,10 +219,25 @@ impl RelayState {
         self.validate_version(&request.client_version)?;
 
         if request.role == PeerRole::Host {
+            // Enforce limits only for new sessions (not resumes).
+            let is_new = !self.sessions.contains_key(&request.session_id);
+            if is_new {
+                self.check_limits(ip)?;
+            }
+
             let mut session = self
                 .sessions
                 .entry(request.session_id.clone())
-                .or_insert_with(|| SessionSlot::new(request.pairing_code.clone()));
+                .or_insert_with(|| {
+                    let mut slot = SessionSlot::new(request.pairing_code.clone());
+                    slot.host_ip = Some(ip);
+                    slot
+                });
+
+            // Track IP for new sessions.
+            if is_new {
+                self.track_ip(ip);
+            }
 
             if session.failed_pairing_attempts >= MAX_PAIRING_FAILURES {
                 warn!(session_id = %request.session_id, "session locked out after too many failed pairing attempts");
@@ -374,17 +454,20 @@ pub async fn health_handler(State(state): State<Arc<RelayState>>) -> Json<serde_
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "sessions": state.session_count(),
+        "max_sessions": state.max_sessions,
+        "max_sessions_per_ip": state.max_sessions_per_ip,
     }))
 }
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<RelayState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip()))
 }
 
-async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelayState>) {
+async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelayState>, ip: IpAddr) {
     let (mut sink, mut stream) = socket.split();
 
     let Some(first_message) = stream.next().await else {
@@ -414,7 +497,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<RelaySta
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<RelayMessage>();
-    let register_response = match state.register(&register_request, tx.clone()) {
+    let register_response = match state.register(&register_request, tx.clone(), ip) {
         Ok(registered) => registered,
         Err(message) => {
             let _ = send_error(&mut sink, &message).await;

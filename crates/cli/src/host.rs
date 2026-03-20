@@ -150,6 +150,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     let mut exit_rx = streams.exit_rx;
     let mut chan = ChannelState::new();
     let mut output_backlog: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut scrollback = ScrollbackBuffer::new();
     let mut peer_online = registered.peer_online;
 
     if peer_online {
@@ -170,9 +171,11 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         tokio::select! {
             output = output_rx.recv() => {
                 let Some(bytes) = output else { continue; };
+                // Always capture output for reconnecting clients.
+                scrollback.push(bytes.clone());
                 if chan.confirmed {
                     if let Some(channel) = chan.channel.as_mut() {
-                        let sealed = channel.seal(&SecureMessage::PtyOutput(bytes.clone()))?;
+                        let sealed = channel.seal(&SecureMessage::PtyOutput(bytes))?;
                         let frame = PeerFrame::Secure(sealed);
                         if let Err(err) = send_peer_frame(&relay_tx, &identity.session_id, frame) {
                             warn!(error = %err, "failed sending PTY output");
@@ -194,6 +197,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                             &mut chan,
                             &mut pty,
                             &mut output_backlog,
+                            &mut scrollback,
                             &relay_tx,
                         )?;
                     }
@@ -271,6 +275,7 @@ fn handle_route(
     chan: &mut ChannelState,
     pty: &mut PtySession,
     output_backlog: &mut VecDeque<Vec<u8>>,
+    scrollback: &mut ScrollbackBuffer,
     relay_tx: &mpsc::UnboundedSender<RelayMessage>,
 ) -> anyhow::Result<()> {
     let frame = decode_peer_frame(&route.payload)?;
@@ -354,7 +359,26 @@ fn handle_route(
             chan.confirmed = true;
             chan.expected_peer_mac = None;
 
-            // Drain backlog now that channel is confirmed.
+            // Replay scrollback first so reconnecting clients catch up on
+            // output that was produced while they were disconnected.
+            let replay = scrollback.drain();
+            if !replay.is_empty() {
+                info!(
+                    session_id = %id.session_id,
+                    chunks = replay.len(),
+                    bytes = replay.iter().map(Vec::len).sum::<usize>(),
+                    "replaying scrollback"
+                );
+                for bytes in replay {
+                    if let Some(ch) = chan.channel.as_mut() {
+                        let sealed = ch.seal(&SecureMessage::PtyOutput(bytes))?;
+                        send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
+                    }
+                }
+            }
+
+            // Then drain the handshake-window backlog (output produced
+            // between handshake start and confirm).
             while let Some(bytes) = output_backlog.pop_front() {
                 if let Some(ch) = chan.channel.as_mut() {
                     let sealed = ch.seal(&SecureMessage::PtyOutput(bytes))?;
@@ -487,6 +511,47 @@ fn queue_backlog(queue: &mut VecDeque<Vec<u8>>, bytes: Vec<u8>) {
         } else {
             break;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scrollback buffer: captures recent PTY output so reconnecting clients
+// can catch up without a full session replay.
+// ---------------------------------------------------------------------------
+
+/// Maximum scrollback size in bytes (128KB).
+const SCROLLBACK_CAPACITY: usize = 128 * 1024;
+
+struct ScrollbackBuffer {
+    chunks: VecDeque<Vec<u8>>,
+    total_bytes: usize,
+}
+
+impl ScrollbackBuffer {
+    fn new() -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            total_bytes: 0,
+        }
+    }
+
+    /// Append a chunk of PTY output, evicting oldest chunks if over capacity.
+    fn push(&mut self, bytes: Vec<u8>) {
+        self.total_bytes += bytes.len();
+        self.chunks.push_back(bytes);
+        while self.total_bytes > SCROLLBACK_CAPACITY {
+            if let Some(front) = self.chunks.pop_front() {
+                self.total_bytes -= front.len();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Drain all buffered chunks for replay, leaving the buffer empty.
+    fn drain(&mut self) -> Vec<Vec<u8>> {
+        self.total_bytes = 0;
+        self.chunks.drain(..).collect()
     }
 }
 
