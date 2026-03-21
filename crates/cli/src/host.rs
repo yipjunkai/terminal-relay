@@ -3,13 +3,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context;
 use clap::Args;
 use crossterm::terminal;
-use qrcode::QrCode;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{info, warn};
+
+use crate::tui::{self, LogLevel, PeerStatus, SessionInfo, Tui, TuiState};
 
 use protocol::{
     crypto::{
@@ -161,13 +161,28 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     };
     store.save(&record)?;
 
-    println!("\nSession {session_id} started for tool '{tool_name}'");
-    println!("Pairing code: {pairing_code}");
-    println!("Fingerprint: {local_fingerprint}");
-    println!("Pairing URI: {pairing_uri}");
-    if !no_qr {
-        print_qr(&pairing_uri)?;
-    }
+    // ── Set up TUI ──────────────────────────────────────────────────
+    let qr_lines = if no_qr {
+        Vec::new()
+    } else {
+        tui::qr_to_lines(&pairing_uri).unwrap_or_default()
+    };
+
+    let tui_state = TuiState::new(
+        SessionInfo {
+            tool_name: tool_name.clone(),
+            session_id: session_id.clone(),
+            relay_url: relay_url.clone(),
+            fingerprint: local_fingerprint.clone(),
+        },
+        qr_lines,
+    );
+
+    let mut tui_handle = Tui::new()?;
+    let mut tui_state = tui_state;
+    tui_state.push_log(LogLevel::Info, "Connected to relay");
+    tui_state.push_log(LogLevel::Info, "Session registered");
+    tui_handle.draw(&tui_state)?;
 
     let identity = SessionIdentity {
         session_id,
@@ -198,43 +213,89 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     tokio::pin!(shutdown);
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
-    loop {
-        tokio::select! {
-            output = output_rx.recv() => {
-                let Some(bytes) = output else { continue; };
-                // Always capture output for reconnecting clients.
-                scrollback.push(bytes.clone());
-                if chan.confirmed {
-                    if let Some(channel) = chan.channel.as_mut() {
-                        let sealed = channel.seal(&SecureMessage::PtyOutput(bytes))?;
-                        let frame = PeerFrame::Secure(sealed);
-                        if let Err(err) = send_peer_frame(&relay_tx, &identity.session_id, frame) {
-                            warn!(error = %err, "failed sending PTY output");
+    let mut redraw = tokio::time::interval(Duration::from_millis(250));
+
+    let result: anyhow::Result<()> = async {
+        loop {
+            tokio::select! {
+                output = output_rx.recv() => {
+                    let Some(bytes) = output else { continue; };
+                    let len = bytes.len() as u64;
+                    // Always capture output for reconnecting clients.
+                    scrollback.push(bytes.clone());
+                    if chan.confirmed {
+                        if let Some(channel) = chan.channel.as_mut() {
+                            let sealed = channel.seal(&SecureMessage::PtyOutput(bytes))?;
+                            let frame = PeerFrame::Secure(sealed);
+                            if let Err(err) = send_peer_frame(&relay_tx, &identity.session_id, frame) {
+                                warn!(error = %err, "failed sending PTY output");
+                            }
+                            tui_state.bytes_sent += len;
                         }
+                    } else {
+                        queue_backlog(&mut output_backlog, bytes);
                     }
-                } else {
-                    queue_backlog(&mut output_backlog, bytes);
                 }
-            }
-            inbound = relay.recv() => {
-                match inbound {
-                    Some(RelayMessage::Route(route)) => {
-                        if route.session_id != identity.session_id {
-                            continue;
+                inbound = relay.recv() => {
+                    match inbound {
+                        Some(RelayMessage::Route(route)) => {
+                            if route.session_id != identity.session_id {
+                                continue;
+                            }
+                            let payload_len = route.payload.len() as u64;
+                            handle_route(
+                                route,
+                                &identity,
+                                &mut chan,
+                                &mut pty,
+                                &mut output_backlog,
+                                &mut scrollback,
+                                &relay_tx,
+                                &mut tui_state,
+                            )?;
+                            tui_state.bytes_received += payload_len;
                         }
-                        handle_route(
-                            route,
-                            &identity,
-                            &mut chan,
-                            &mut pty,
-                            &mut output_backlog,
-                            &mut scrollback,
-                            &relay_tx,
-                        )?;
-                    }
-                    Some(RelayMessage::PeerStatus(status)) => {
-                        if status.role == PeerRole::Client {
-                            peer_online = status.online;
+                        Some(RelayMessage::PeerStatus(status)) => {
+                            if status.role == PeerRole::Client {
+                                peer_online = status.online;
+                                if peer_online {
+                                    tui_state.status = PeerStatus::PeerConnected;
+                                    tui_state.push_log(LogLevel::Info, "Client connected");
+                                    send_handshake(
+                                        &identity.session_id,
+                                        &relay_tx,
+                                        &identity.local_public,
+                                        &local_fingerprint,
+                                        Some(identity.tool_name.clone()),
+                                    )?;
+                                    tui_state.status = PeerStatus::Handshaking;
+                                } else {
+                                    tui_state.status = PeerStatus::Disconnected;
+                                    tui_state.push_log(LogLevel::Warning, "Client disconnected");
+                                    info!(session_id = %identity.session_id, "client disconnected, awaiting reconnect");
+                                    chan.reset();
+                                    // After brief delay, show waiting status.
+                                    tui_state.status = PeerStatus::WaitingForPeer;
+                                }
+                            }
+                        }
+                        Some(RelayMessage::Error(err)) => {
+                            tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
+                            warn!(session_id = %identity.session_id, message = %err.message, "relay reported error");
+                        }
+                        Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
+                        None => {
+                            tui_state.status = PeerStatus::Disconnected;
+                            tui_state.push_log(LogLevel::Warning, "Relay disconnected, reconnecting...");
+                            warn!(session_id = %identity.session_id, "relay disconnected, attempting recovery");
+                            let (new_relay, new_registered) = reconnect_host(&relay_url, &identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
+                            relay = new_relay;
+                            relay_tx = relay.sender();
+                            resume_token = new_registered.resume_token.clone();
+                            chan.reset();
+                            peer_online = new_registered.peer_online;
+                            tui_state.status = PeerStatus::WaitingForPeer;
+                            tui_state.push_log(LogLevel::Info, "Reconnected to relay");
                             if peer_online {
                                 send_handshake(
                                     &identity.session_id,
@@ -243,61 +304,55 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                                     &local_fingerprint,
                                     Some(identity.tool_name.clone()),
                                 )?;
-                            } else {
-                                info!(session_id = %identity.session_id, "client disconnected, awaiting reconnect");
-                                chan.reset();
                             }
                         }
                     }
-                    Some(RelayMessage::Error(err)) => {
-                        warn!(session_id = %identity.session_id, message = %err.message, "relay reported error");
+                }
+                _ = heartbeat.tick() => {
+                    let _ = relay_tx.send(RelayMessage::Ping(now_millis()));
+                }
+                _ = redraw.tick() => {
+                    // Check for quit key press (non-blocking).
+                    if tui_handle.poll_quit(Duration::ZERO)? {
+                        tui_state.push_log(LogLevel::Info, "Shutting down...");
+                        tui_handle.draw(&tui_state)?;
+                        break;
                     }
-                    Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
-                    None => {
-                        warn!(session_id = %identity.session_id, "relay disconnected, attempting recovery");
-                        let (new_relay, new_registered) = reconnect_host(&relay_url, &identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
-                        relay = new_relay;
-                        relay_tx = relay.sender();
-                        resume_token = new_registered.resume_token.clone();
-                        chan.reset();
-                        peer_online = new_registered.peer_online;
-                        if peer_online {
-                            send_handshake(
-                                &identity.session_id,
-                                &relay_tx,
-                                &identity.local_public,
-                                &local_fingerprint,
-                                Some(identity.tool_name.clone()),
-                            )?;
+                    tui_handle.draw(&tui_state)?;
+                }
+                exit_code = &mut exit_rx => {
+                    let code = exit_code.unwrap_or(1);
+                    tui_state.push_log(LogLevel::Info, format!("Process exited (code {code})"));
+                    info!(session_id = %identity.session_id, code = code, "PTY process exited");
+                    // Notify the attached client that the session has ended.
+                    if chan.confirmed
+                        && let Some(channel) = chan.channel.as_mut()
+                    {
+                        let msg = SecureMessage::SessionEnded { exit_code: code };
+                        if let Ok(sealed) = channel.seal(&msg) {
+                            let _ = send_peer_frame(&relay_tx, &identity.session_id, PeerFrame::Secure(sealed));
                         }
                     }
+                    // Show final state briefly before exiting.
+                    tui_handle.draw(&tui_state)?;
+                    sleep(Duration::from_secs(1)).await;
+                    break;
                 }
-            }
-            _ = heartbeat.tick() => {
-                let _ = relay_tx.send(RelayMessage::Ping(now_millis()));
-            }
-            exit_code = &mut exit_rx => {
-                let code = exit_code.unwrap_or(1);
-                info!(session_id = %identity.session_id, code = code, "PTY process exited");
-                // Notify the attached client that the session has ended.
-                if chan.confirmed
-                    && let Some(channel) = chan.channel.as_mut()
-                {
-                    let msg = SecureMessage::SessionEnded { exit_code: code };
-                    if let Ok(sealed) = channel.seal(&msg) {
-                        let _ = send_peer_frame(&relay_tx, &identity.session_id, PeerFrame::Secure(sealed));
-                    }
+                _ = &mut shutdown => {
+                    tui_state.push_log(LogLevel::Info, "Received shutdown signal");
+                    info!(session_id = %identity.session_id, "received shutdown signal, stopping host session");
+                    tui_handle.draw(&tui_state)?;
+                    break;
                 }
-                break;
-            }
-            _ = &mut shutdown => {
-                info!(session_id = %identity.session_id, "received shutdown signal, stopping host session");
-                break;
             }
         }
+        Ok(())
     }
+    .await;
 
-    Ok(())
+    // Ensure terminal is restored even on error.
+    tui_handle.restore()?;
+    result
 }
 
 fn handle_route(
@@ -308,6 +363,7 @@ fn handle_route(
     output_backlog: &mut VecDeque<Vec<u8>>,
     scrollback: &mut ScrollbackBuffer,
     relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    tui_state: &mut TuiState,
 ) -> anyhow::Result<()> {
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
@@ -337,6 +393,7 @@ fn handle_route(
                 return Ok(());
             }
 
+            tui_state.push_log(LogLevel::Info, format!("Peer fingerprint: {}", handshake.fingerprint));
             info!(
                 session_id = %id.session_id,
                 peer_fingerprint = %handshake.fingerprint,
@@ -386,6 +443,8 @@ fn handle_route(
                 return Ok(());
             }
 
+            tui_state.status = PeerStatus::Secure;
+            tui_state.push_log(LogLevel::Success, "E2E encryption established");
             info!(session_id = %id.session_id, "handshake confirmed, channel trusted");
             chan.confirmed = true;
             chan.expected_peer_mac = None;
@@ -394,10 +453,15 @@ fn handle_route(
             // output that was produced while they were disconnected.
             let replay = scrollback.drain();
             if !replay.is_empty() {
+                let total_bytes: usize = replay.iter().map(Vec::len).sum();
+                tui_state.push_log(
+                    LogLevel::Info,
+                    format!("Sending scrollback ({:.1} KB)", total_bytes as f64 / 1024.0),
+                );
                 info!(
                     session_id = %id.session_id,
                     chunks = replay.len(),
-                    bytes = replay.iter().map(Vec::len).sum::<usize>(),
+                    bytes = total_bytes,
                     "replaying scrollback"
                 );
                 for bytes in replay {
@@ -590,49 +654,6 @@ fn initial_size(rows: Option<u16>, cols: Option<u16>) -> (u16, u16) {
     terminal::size()
         .map(|(c, r)| (rows.unwrap_or(r), cols.unwrap_or(c)))
         .unwrap_or((40, 120))
-}
-
-fn print_qr(data: &str) -> anyhow::Result<()> {
-    let code = QrCode::new(data.as_bytes()).context("failed generating QR code")?;
-    let width = code.width();
-    let modules: Vec<bool> = code
-        .to_colors()
-        .into_iter()
-        .map(|c| c == qrcode::Color::Dark)
-        .collect();
-
-    // Use Unicode half-block rendering: each character encodes two vertical rows.
-    // ▀ = top dark, bottom light    █ = both dark
-    // ▄ = top light, bottom dark    (space) = both light
-    // This halves the QR code height compared to one-char-per-module rendering.
-    let get = |row: i32, col: i32| -> bool {
-        if row < 0 || col < 0 || row >= width as i32 || col >= width as i32 {
-            false
-        } else {
-            modules[row as usize * width + col as usize]
-        }
-    };
-
-    let margin = 1i32;
-    let mut output = String::new();
-    output.push('\n');
-    let mut row = -margin;
-    while row < width as i32 + margin {
-        for col in -margin..width as i32 + margin {
-            let top = get(row, col);
-            let bottom = get(row + 1, col);
-            output.push(match (top, bottom) {
-                (true, true) => '█',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (false, false) => ' ',
-            });
-        }
-        output.push('\n');
-        row += 2;
-    }
-    println!("{output}");
-    Ok(())
 }
 
 /// Returns the current time as an RFC 3339 UTC timestamp (e.g. "2026-03-17T16:30:00Z").
