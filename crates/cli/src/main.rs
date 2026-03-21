@@ -14,7 +14,9 @@ mod tui;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+
+use clap_complete::Shell;
 
 use crate::{
     ai_tools::detect_known_tools,
@@ -54,13 +56,14 @@ enum Command {
     /// Log out and remove the stored API key.
     #[cfg(feature = "hosted")]
     Logout,
-    /// Show the current authentication status.
-    #[cfg(feature = "hosted")]
-    Status,
-    /// List known AI tools and their PATH availability.
-    DetectTools,
-    /// List persisted session records.
-    Sessions,
+    /// Show environment, auth status, detected tools, and connectivity.
+    Doctor,
+    /// Generate shell completions.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[tokio::main]
@@ -104,57 +107,129 @@ async fn main() -> anyhow::Result<()> {
         Command::Logout => {
             account::logout()?;
         }
-        #[cfg(feature = "hosted")]
-        Command::Status => {
-            let config = config::Config::load()?;
-            match config.api_key {
-                Some(key) => {
-                    let prefix = if key.len() > 16 { &key[..16] } else { &key };
-                    println!("Authenticated");
-                    println!("  API key:     {prefix}...");
-                    println!(
-                        "  Control API: {}",
-                        config
-                            .control_api_url
-                            .as_deref()
-                            .unwrap_or(constants::DEFAULT_CONTROL_API_URL)
-                    );
-                }
-                None => {
-                    println!("Not authenticated. Run `terminal-relay auth` to get started.");
-                }
-            }
+        Command::Doctor => {
+            run_doctor().await;
         }
-        Command::DetectTools => {
-            for tool in detect_known_tools() {
-                println!(
-                    "{}\t{}\t{}",
-                    tool.name,
-                    if tool.available {
-                        "available"
-                    } else {
-                        "missing"
-                    },
-                    tool.command
-                );
-            }
-        }
-        Command::Sessions => {
-            let records = store.list().context("failed reading persisted sessions")?;
-            if records.is_empty() {
-                println!("No persisted sessions");
-            } else {
-                for record in records {
-                    println!(
-                        "{}\t{}\t{}\t{}",
-                        record.session_id, record.tool, record.relay_url, record.created_at
-                    );
-                }
-            }
+        Command::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                constants::APP_NAME,
+                &mut std::io::stdout(),
+            );
         }
     }
 
     Ok(())
+}
+
+async fn run_doctor() {
+    use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+
+    fn label(s: &str) {
+        let _ = crossterm::execute!(std::io::stdout(),
+            SetForegroundColor(Color::DarkGrey), Print(format!("  {:<14}", s)), ResetColor);
+    }
+    fn ok(s: &str) {
+        let _ = crossterm::execute!(std::io::stdout(),
+            SetForegroundColor(Color::Green), Print("✓ "), ResetColor, Print(format!("{s}\n")));
+    }
+    fn warn(s: &str) {
+        let _ = crossterm::execute!(std::io::stdout(),
+            SetForegroundColor(Color::Yellow), Print("! "), ResetColor, Print(format!("{s}\n")));
+    }
+    fn fail(s: &str) {
+        let _ = crossterm::execute!(std::io::stdout(),
+            SetForegroundColor(Color::Red), Print("✗ "), ResetColor, Print(format!("{s}\n")));
+    }
+
+    println!();
+    crossterm::execute!(
+        std::io::stdout(),
+        SetAttribute(Attribute::Bold),
+        Print("  Terminal Relay Doctor\n"),
+        SetAttribute(Attribute::Reset),
+    )
+    .ok();
+    println!();
+
+    // Version
+    label("Version");
+    ok(&format!("v{}", constants::CLIENT_VERSION));
+
+    // Build
+    label("Build");
+    if cfg!(feature = "hosted") {
+        ok("hosted (with auth)");
+    } else {
+        ok("self-hosted (no auth)");
+    }
+
+    // Config
+    label("Config");
+    let config = config::Config::load().unwrap_or_default();
+    match &config.default_tool {
+        Some(tool) => ok(&format!("default tool: {tool}")),
+        None => warn("no default tool (will prompt on first start)"),
+    }
+
+    // Auth (hosted only)
+    #[cfg(feature = "hosted")]
+    {
+        label("Auth");
+        match &config.api_key {
+            Some(key) => {
+                let prefix = if key.len() > 16 { &key[..16] } else { key };
+                ok(&format!("{prefix}..."));
+            }
+            None => warn("not authenticated — run `terminal-relay auth`"),
+        }
+    }
+
+    // Relay connectivity
+    label("Relay");
+    #[cfg(feature = "hosted")]
+    {
+        let relay_url = format!("{}/healthz",
+            constants::DEFAULT_RELAY_URL
+                .replace("wss://", "https://")
+                .replace("ws://", "http://")
+                .replace("/ws", "")
+        );
+        match reqwest::get(&relay_url).await {
+            Ok(resp) if resp.status().is_success() => ok(&format!("{} (reachable)", constants::DEFAULT_RELAY_URL)),
+            Ok(resp) => warn(&format!("{} (HTTP {})", constants::DEFAULT_RELAY_URL, resp.status())),
+            Err(_) => fail(&format!("{} (unreachable)", constants::DEFAULT_RELAY_URL)),
+        }
+    }
+    #[cfg(not(feature = "hosted"))]
+    {
+        ok("self-hosted (use TERMINAL_RELAY_URL to configure)");
+    }
+
+    // Tools
+    println!();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        SetAttribute(Attribute::Bold),
+        Print("  AI Tools\n"),
+        SetAttribute(Attribute::Reset),
+    );
+    println!();
+
+    for tool in detect_known_tools() {
+        label(&tool.name);
+        if tool.available {
+            let path = which::which(&tool.command)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| tool.command.clone());
+            ok(&path);
+        } else {
+            fail("not found");
+        }
+    }
+
+    println!();
 }
 
 fn default_state_dir() -> anyhow::Result<PathBuf> {

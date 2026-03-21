@@ -212,14 +212,20 @@ fn render(frame: &mut Frame, state: &TuiState) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    // Vertical split: top (info + QR) takes most space, log is compact.
+    // QR height is known: lines + 2 (blank + label) + 2 (border). Session info
+    // panel needs ~10 rows. Use the larger of the two as the fixed top height,
+    // and let the log panel fill the remaining space.
+    let qr_content_height = state.qr_lines.len() as u16 + 2; // lines + blank + label
+    let qr_panel_height = qr_content_height + 2; // + top/bottom border
+    let top_height = qr_panel_height.max(12); // at least 12 for session info
+
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),   // top: session info + QR (expands)
-            Constraint::Length(1), // spacer
-            Constraint::Length(5), // log: fixed 5 lines (3 visible + border)
-            Constraint::Length(1), // status bar
+            Constraint::Length(top_height), // top: session info + QR (fixed to QR height)
+            Constraint::Length(1),          // spacer
+            Constraint::Min(4),             // log: fills remaining space
+            Constraint::Length(1),          // status bar
         ])
         .split(inner);
 

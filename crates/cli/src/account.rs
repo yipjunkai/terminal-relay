@@ -90,16 +90,15 @@ pub async fn auth(
     }
 }
 
-/// Log out by removing the stored API key.
+/// Log out by resetting config to defaults (clears API key, preferences, etc.).
 pub fn logout() -> anyhow::Result<()> {
-    let mut config = Config::load()?;
+    let config = Config::load()?;
     if config.api_key.is_none() {
         println!("Not logged in.");
         return Ok(());
     }
-    config.api_key = None;
-    config.save()?;
-    println!("Logged out. API key removed from ~/.terminal-relay/config.toml");
+    Config::default().save()?;
+    println!("Logged out. Config reset to defaults.");
     Ok(())
 }
 
