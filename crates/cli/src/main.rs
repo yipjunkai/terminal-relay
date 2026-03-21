@@ -9,6 +9,7 @@ mod host;
 mod pty;
 mod relay_client;
 mod state;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -67,14 +68,25 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file if present (silently ignored if missing).
     let _ = dotenvy::dotenv();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,cli=debug".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // For the `start` command, suppress tracing stderr output because the TUI
+    // owns the terminal. Other commands use normal stderr logging.
+    let is_tui = matches!(cli.command, Command::Start(_));
+    if is_tui {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_env_filter("off")
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info,cli=debug".into()),
+            )
+            .init();
+    }
+
     let store = SessionStore::new(default_state_dir()?)?;
 
     match cli.command {
