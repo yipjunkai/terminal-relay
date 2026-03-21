@@ -113,6 +113,15 @@ Each `Handshake` message includes a `timestamp_ms` field. The receiver rejects h
 
 The pairing URI (displayed as a QR code or copied manually) includes a SHA-256 fingerprint of the host's public key. The client verifies this fingerprint on connection, detecting any man-in-the-middle substitution of public keys by the relay.
 
+### Authentication model
+
+The hosted relay uses HMAC-signed API keys for access control. The authentication model is role-aware:
+
+- **Hosts** must authenticate with a valid API key when creating a session. This establishes billing attribution and rate limiting.
+- **Clients** can join an existing session without an API key, as long as the session was created by an authenticated host. The pairing code (18 random alphanumeric characters, ~104 bits of entropy) serves as the client's authorization — only someone the host explicitly shared it with can connect.
+
+This design means the host's API key never leaves the host machine. The QR code / pairing URI contains only the session ID, pairing code, relay URL, and host fingerprint — no secrets. Self-hosted relays running without `HMAC_SECRET` skip authentication entirely (open mode).
+
 ### Zero-knowledge relay
 
 The relay server sees only:

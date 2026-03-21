@@ -139,12 +139,14 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     let mut relay_tx = relay.sender();
     let mut resume_token = registered.resume_token.clone();
 
+    // Build pairing URI without the API key — clients can now join authenticated
+    // sessions without their own key (the relay checks the host's auth instead).
     let pairing_uri = build_pairing_uri(&PairingUri {
         relay_url: relay_url.clone(),
         session_id: session_id.clone(),
         pairing_code: pairing_code.clone(),
         expected_fingerprint: Some(local_fingerprint.clone()),
-        api_key: api_key.clone(),
+        api_key: None,
     })?;
 
     let record = SessionRecord {

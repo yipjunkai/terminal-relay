@@ -174,7 +174,7 @@ Expands the current single-viewer model into a collaboration platform. Feeds the
 
 Manual rotation is fine until there are paying users. This section is reference for when it becomes necessary.
 
-- [ ] **Session-scoped tokens for QR codes** — Currently the host's long-lived API key is embedded in every QR code / pairing URI. Replace with a short-lived, session-scoped token that the relay accepts only for that session. Prevents key leakage via QR photography or screenshot sharing.
+- [x] **Keyless client connections** — Clients can now join authenticated sessions without an API key. The relay verifies the session was created by an authenticated host, and the pairing code serves as the client's authorization. The host's API key never leaves the host machine, eliminating the QR code key leakage concern.
 - [ ] **Default API key expiration** — Keys are created with no expiry. Add a default TTL (e.g. 90 days) at creation. CLI should warn when approaching expiry and support `terminal-relay auth rotate`.
 - [ ] Add `status` field to `ApiKey` model (`active`, `inactive`, `revoked`). Inactive keys still validate but signal the client to rotate.
 - [ ] `POST /api/keys/rotate` endpoint + CLI auto-rotation. Scheduled job to transition keys by age.

@@ -549,19 +549,23 @@ pub async fn ws_handler(
     Query(params): Query<WsQueryParams>,
     State(state): State<Arc<RelayState>>,
 ) -> impl IntoResponse {
-    // If auth is enabled, verify the API key before upgrading the WebSocket
-    if state.auth.is_enabled() {
-        let Some(api_key) = params.api_key else {
-            return (StatusCode::UNAUTHORIZED, "missing api_key query parameter").into_response();
-        };
+    if !state.auth.is_enabled() {
+        // Open relay mode — no auth required.
+        return ws
+            .on_upgrade(move |socket| handle_socket(socket, state, addr.ip(), None))
+            .into_response();
+    }
 
+    // Auth is enabled. If an API key is provided, validate it (hosts must provide one).
+    // If no key is provided, allow the upgrade — the connection will be checked in
+    // handle_socket after we know the role. Clients can join authenticated sessions
+    // without their own key (the host already paid for the session).
+    if let Some(api_key) = params.api_key {
         match state.auth.verify_api_key(&api_key).await {
             Some(payload) => {
-                // Check per-user session limit before upgrading
                 if let Err(msg) = state.check_user_limit(&payload.uid, &payload.tier) {
                     return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
                 }
-
                 info!(
                     user_id = %payload.uid,
                     key_id = %payload.kid,
@@ -569,8 +573,10 @@ pub async fn ws_handler(
                     ip = %addr.ip(),
                     "authenticated WebSocket upgrade"
                 );
-                ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip(), Some(payload)))
-                    .into_response()
+                ws.on_upgrade(move |socket| {
+                    handle_socket(socket, state, addr.ip(), Some(payload))
+                })
+                .into_response()
             }
             None => {
                 warn!(ip = %addr.ip(), "WebSocket upgrade rejected: invalid or revoked API key");
@@ -578,7 +584,8 @@ pub async fn ws_handler(
             }
         }
     } else {
-        // Open relay mode — no auth required
+        // No API key — allow upgrade, enforce role-based auth in handle_socket.
+        info!(ip = %addr.ip(), "unauthenticated WebSocket upgrade (pending role check)");
         ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip(), None))
             .into_response()
     }
@@ -622,6 +629,44 @@ async fn handle_socket(
     let mut bytes_up: u64 = 0;
     let mut bytes_down: u64 = 0;
     let connected_at = Instant::now();
+
+    // Role-based auth enforcement: hosts must be authenticated, clients can join
+    // existing sessions that were created by an authenticated host.
+    if state.auth.is_enabled() && api_key_payload.is_none() {
+        match register_request.role {
+            PeerRole::Host => {
+                warn!(
+                    session_id = %register_request.session_id,
+                    ip = %ip,
+                    "rejecting unauthenticated host"
+                );
+                let _ = send_error(&mut sink, "authentication required for host connections").await;
+                return;
+            }
+            PeerRole::Client => {
+                // Allow if the session exists and was created by an authenticated host.
+                let session_authenticated = state
+                    .sessions
+                    .get(&register_request.session_id)
+                    .map(|s| s.host_user_id.is_some())
+                    .unwrap_or(false);
+                if !session_authenticated {
+                    warn!(
+                        session_id = %register_request.session_id,
+                        ip = %ip,
+                        "rejecting unauthenticated client: session not found or host not authenticated"
+                    );
+                    let _ = send_error(&mut sink, "session not found or requires authentication").await;
+                    return;
+                }
+                info!(
+                    session_id = %register_request.session_id,
+                    ip = %ip,
+                    "client joining authenticated session without API key"
+                );
+            }
+        }
+    }
 
     // Report session start to control API (fire-and-forget)
     if let Some(ref payload) = api_key_payload {
