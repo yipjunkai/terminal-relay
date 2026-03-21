@@ -4,8 +4,8 @@ use std::{
 };
 
 use aes_gcm::{
-    Aes256Gcm,
     aead::{Aead, KeyInit},
+    Aes256Gcm,
 };
 use anyhow::Context;
 use rand::RngCore;
@@ -68,34 +68,6 @@ impl SessionStore {
             .with_context(|| format!("failed reading session state {}", path.display()))?;
         let plaintext = open_state_or_legacy(&self.state_key, &bytes)?;
         serde_json::from_slice(&plaintext).context("failed parsing session state")
-    }
-
-    pub fn list(&self) -> anyhow::Result<Vec<SessionRecord>> {
-        let mut records = Vec::new();
-        for entry in
-            fs::read_dir(self.sessions_dir()).context("failed reading sessions directory")?
-        {
-            let entry = entry?;
-            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let bytes = fs::read(entry.path())?;
-            let plaintext = match open_state_or_legacy(&self.state_key, &bytes) {
-                Ok(p) => p,
-                Err(err) => {
-                    tracing::warn!(
-                        path = %entry.path().display(),
-                        error = %err,
-                        "skipping unreadable session file"
-                    );
-                    continue;
-                }
-            };
-            let record: SessionRecord = serde_json::from_slice(&plaintext)?;
-            records.push(record);
-        }
-        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(records)
     }
 
     fn sessions_dir(&self) -> PathBuf {

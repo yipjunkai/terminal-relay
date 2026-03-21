@@ -1,4 +1,8 @@
+use std::io::{self, Write};
+
 use serde::{Deserialize, Serialize};
+
+use crate::config::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCandidate {
@@ -42,57 +46,21 @@ pub fn detect_known_tools() -> Vec<ToolCandidate> {
         .collect()
 }
 
-/// Resolve a tool by name. If `tool` is None, auto-detect the first available.
-/// If the name matches a known tool, use its binary and default args.
-/// Otherwise, treat the name as a raw command.
+/// Resolve a tool by name or config default. If neither is set and no default
+/// exists in config, show an interactive picker (first-run experience).
 pub fn resolve_tool(tool: Option<&str>, extra_args: &[String]) -> anyhow::Result<ToolCommand> {
     let tools = detect_known_tools();
 
     let chosen = match tool {
+        Some(name) => resolve_by_name(name, &tools)?,
         None => {
-            // Auto-detect: pick the first available known tool.
-            let candidate = tools.into_iter().find(|c| c.available).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no supported AI tool detected on PATH. Use --tool <name> to specify one"
-                )
-            })?;
-            ToolCommand {
-                name: candidate.name,
-                command: candidate.command,
-                args: candidate.args,
-            }
-        }
-        Some(name) => {
-            // Check known tools first.
-            if let Some(candidate) = tools.iter().find(|c| c.name == name) {
-                if !candidate.available {
-                    return Err(anyhow::anyhow!(
-                        "tool '{}' is not available on PATH",
-                        candidate.name
-                    ));
-                }
-                ToolCommand {
-                    name: candidate.name.clone(),
-                    command: candidate.command.clone(),
-                    args: candidate.args.clone(),
-                }
+            // Check config for a saved default.
+            let config = Config::load().unwrap_or_default();
+            if let Some(ref default) = config.default_tool {
+                resolve_by_name(default, &tools)?
             } else {
-                // Unknown name — treat as a raw command.
-                // Split on whitespace to support e.g. --tool "my-tool --flag"
-                let parts: Vec<&str> = name.split_whitespace().collect();
-                let (cmd, cmd_args) = parts
-                    .split_first()
-                    .ok_or_else(|| anyhow::anyhow!("--tool value cannot be empty"))?;
-
-                if which::which(cmd).is_err() {
-                    return Err(anyhow::anyhow!("'{}' is not found on PATH", cmd));
-                }
-
-                ToolCommand {
-                    name: cmd.to_string(),
-                    command: cmd.to_string(),
-                    args: cmd_args.iter().map(|s| s.to_string()).collect(),
-                }
+                // First run — show interactive picker.
+                pick_and_save_default(&tools)?
             }
         }
     };
@@ -104,4 +72,192 @@ pub fn resolve_tool(tool: Option<&str>, extra_args: &[String]) -> anyhow::Result
         command: chosen.command,
         args,
     })
+}
+
+/// Resolve a tool by name against known tools, or treat as a raw command.
+fn resolve_by_name(name: &str, tools: &[ToolCandidate]) -> anyhow::Result<ToolCommand> {
+    if let Some(candidate) = tools.iter().find(|c| c.name == name) {
+        if !candidate.available {
+            return Err(anyhow::anyhow!(
+                "tool '{}' is not available on PATH. Install it or use --tool <name>",
+                candidate.name
+            ));
+        }
+        Ok(ToolCommand {
+            name: candidate.name.clone(),
+            command: candidate.command.clone(),
+            args: candidate.args.clone(),
+        })
+    } else {
+        // Unknown name — treat as a raw command.
+        let parts: Vec<&str> = name.split_whitespace().collect();
+        let (cmd, cmd_args) = parts
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("--tool value cannot be empty"))?;
+
+        if which::which(cmd).is_err() {
+            return Err(anyhow::anyhow!("'{}' is not found on PATH", cmd));
+        }
+
+        Ok(ToolCommand {
+            name: cmd.to_string(),
+            command: cmd.to_string(),
+            args: cmd_args.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+}
+
+/// Interactive first-run tool picker using a TUI. Shows available tools with
+/// arrow-key navigation, saves the selection to config as the default.
+fn pick_and_save_default(tools: &[ToolCandidate]) -> anyhow::Result<ToolCommand> {
+    use crossterm::{
+        cursor,
+        event::{self, Event, KeyCode},
+        execute,
+        style::{Attribute, Color as CtColor, Print, ResetColor, SetAttribute, SetForegroundColor},
+        terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+
+    let available: Vec<&ToolCandidate> = tools.iter().filter(|t| t.available).collect();
+    let unavailable: Vec<&ToolCandidate> = tools.iter().filter(|t| !t.available).collect();
+
+    if available.is_empty() {
+        eprintln!("No supported AI tools found on PATH.\n");
+        eprintln!("Install one of these:");
+        for t in tools {
+            eprintln!("  - {}", t.name);
+        }
+        eprintln!("\nOr use --tool <command> to specify any command.");
+        return Err(anyhow::anyhow!("no AI tools available"));
+    }
+
+    // Single tool — auto-select without TUI.
+    if available.len() == 1 {
+        let tool = available[0];
+        println!("  Using {} (only available tool).", tool.name);
+        save_default(&tool.name)?;
+        return Ok(ToolCommand {
+            name: tool.name.clone(),
+            command: tool.command.clone(),
+            args: tool.args.clone(),
+        });
+    }
+
+    // Multiple tools — show interactive TUI picker.
+    terminal::enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+
+    let mut selected: usize = 0;
+
+    let result = loop {
+        // Draw.
+        execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
+
+        execute!(
+            stdout,
+            cursor::MoveTo(2, 1),
+            SetForegroundColor(CtColor::White),
+            SetAttribute(Attribute::Bold),
+            Print("Welcome to Terminal Relay"),
+            SetAttribute(Attribute::Reset),
+        )?;
+
+        execute!(
+            stdout,
+            cursor::MoveTo(2, 3),
+            SetForegroundColor(CtColor::DarkGrey),
+            Print("Select your default AI tool:"),
+            ResetColor,
+        )?;
+
+        for (i, t) in available.iter().enumerate() {
+            let y = 5 + i as u16;
+            if i == selected {
+                execute!(
+                    stdout,
+                    cursor::MoveTo(2, y),
+                    SetForegroundColor(CtColor::Cyan),
+                    Print(format!("  > {}", t.name)),
+                    ResetColor,
+                )?;
+            } else {
+                execute!(
+                    stdout,
+                    cursor::MoveTo(2, y),
+                    SetForegroundColor(CtColor::White),
+                    Print(format!("    {}", t.name)),
+                    ResetColor,
+                )?;
+            }
+        }
+
+        if !unavailable.is_empty() {
+            let y = 5 + available.len() as u16 + 1;
+            for (i, t) in unavailable.iter().enumerate() {
+                execute!(
+                    stdout,
+                    cursor::MoveTo(2, y + i as u16),
+                    SetForegroundColor(CtColor::DarkGrey),
+                    Print(format!("    {} (not installed)", t.name)),
+                    ResetColor,
+                )?;
+            }
+        }
+
+        let hint_y = 5 + tools.len() as u16 + 2;
+        execute!(
+            stdout,
+            cursor::MoveTo(2, hint_y),
+            SetForegroundColor(CtColor::DarkGrey),
+            Print("↑/↓ navigate   enter select   q quit"),
+            ResetColor,
+        )?;
+
+        stdout.flush()?;
+
+        // Handle input.
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if selected > 0 {
+                        selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if selected + 1 < available.len() {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    break Ok(available[selected]);
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    break Err(anyhow::anyhow!("tool selection cancelled"));
+                }
+                _ => {}
+            }
+        }
+    };
+
+    // Restore terminal.
+    execute!(stdout, cursor::Show, LeaveAlternateScreen)?;
+    terminal::disable_raw_mode()?;
+
+    let tool = result?;
+    println!("  Saved {} as your default tool.\n", tool.name);
+    save_default(&tool.name)?;
+
+    Ok(ToolCommand {
+        name: tool.name.clone(),
+        command: tool.command.clone(),
+        args: tool.args.clone(),
+    })
+}
+
+fn save_default(tool_name: &str) -> anyhow::Result<()> {
+    let mut config = Config::load().unwrap_or_default();
+    config.default_tool = Some(tool_name.to_string());
+    config.save()?;
+    Ok(())
 }

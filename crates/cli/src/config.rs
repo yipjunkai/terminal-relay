@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::STATE_DIR_NAME;
 
-#[cfg_attr(not(feature = "hosted"), allow(unused))]
 const CONFIG_FILE: &str = "config.toml";
 
 /// User configuration persisted in `~/.terminal-relay/config.toml`.
-#[cfg_attr(not(feature = "hosted"), allow(unused))]
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
+    /// Default AI tool to use when `--tool` is not specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
     /// API key for authenticating with the hosted relay.
     #[cfg(feature = "hosted")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,7 +24,6 @@ pub struct Config {
     pub control_api_url: Option<String>,
 }
 
-#[cfg_attr(not(feature = "hosted"), allow(unused))]
 impl Config {
     /// Load config from `~/.terminal-relay/config.toml`, or return defaults if missing.
     pub fn load() -> anyhow::Result<Self> {
@@ -65,7 +65,6 @@ impl Config {
     }
 }
 
-#[cfg_attr(not(feature = "hosted"), allow(unused))]
 fn config_path() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().context("failed resolving home directory")?;
     Ok(home.join(STATE_DIR_NAME).join(CONFIG_FILE))

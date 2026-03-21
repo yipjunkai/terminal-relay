@@ -16,17 +16,21 @@ The path from "installed the CLI" to "session running on my phone" must be frict
   - [ ] Replace inline activation page with Clerk/OAuth integration for production.
 - [x] `terminal-relay auth` CLI command (email/api-key flags), `logout`, `status`. Config stored in `~/.terminal-relay/config.toml`.
 - [x] Helpful error message when connecting without API key or with expired/revoked key.
-- [ ] **First-run setup flow** — On first `terminal-relay start`, detect installed AI tools, confirm default tool, display quick-start summary. Consider onboarding walkthrough in mobile app with demo mode (fake session so users can try the UI before setting up the CLI).
-- [ ] Add default tool and args to `~/.terminal-relay/config.toml`.
+- [x] **First-run setup flow** — Interactive TUI tool picker on first `terminal-relay start`. Detects installed AI tools, user selects default with arrow keys, saved to config. Auto-selects if only one tool found.
+- [x] Add default tool to `~/.terminal-relay/config.toml`.
+- [x] `terminal-relay doctor` command — colored diagnostic output: version, build type, config, auth status, relay connectivity, detected tools with paths.
 
 ## CLI UX (high impact, quick wins)
 
-- [ ] **Colored/formatted output** — Session status, pairing info, QR code, and errors should use color and formatting instead of raw `println!`. Low effort, high polish.
+- [x] **TUI host dashboard** — `terminal-relay start` renders a fixed ratatui-based terminal UI with session info panel, QR code panel, scrolling event log, and status bar. Live updates for connection status, traffic stats, and uptime. Replaces raw `println!` output.
+- [x] **Hosted/self-hosted feature flag** — `hosted` Cargo feature compiles out all hosted-service code (auth, device flow, control API calls). Default build is clean self-hosted binary; CI/Homebrew/install.sh build with `--features hosted`.
+- [x] **Keyless client connections** — Clients join authenticated sessions via pairing code alone; host's API key never leaves the host machine. QR codes are significantly smaller.
+- [x] **Colored/formatted output** — `doctor` command with colored diagnostics. `status` and `detect-tools` merged into `doctor`. `sessions` command removed (redundant with TUI).
 - [ ] **Human-readable session names** — e.g. `claude-backend-a3f` instead of raw UUIDs in CLI output and QR codes. Easier to reference in conversation.
 - [ ] **Session management commands** — `session stop <id>` / `session stop --all`, `session status` (live info: running process, connected peers, uptime), `session cleanup` (remove stale files).
 - [ ] Shell completions generation (`terminal-relay completions bash/zsh/fish`).
 - [ ] Auto-update check on startup: warn if newer CLI version available (`--no-update-check` to suppress).
-- [ ] `--diagnostics` command for generating debug/support reports (inspired by Goose).
+- [x] `terminal-relay doctor` command replaces `--diagnostics` (inspired by `flutter doctor`).
 
 ## Multi-session support (competitive necessity)
 
