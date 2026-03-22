@@ -246,6 +246,20 @@ TERMINAL_RELAY_URL=ws://127.0.0.1:8080/ws cargo run -p cli --features hosted -- 
 cargo test
 ```
 
+### Running from another directory
+
+To use the development CLI from a different project directory:
+
+```bash
+# Run against hosted relay from any directory
+cargo run --manifest-path ~/path/to/terminal-relay/Cargo.toml -p cli --features hosted -- start claude
+
+# Run against local relay from any directory
+TERMINAL_RELAY_URL=ws://127.0.0.1:8080/ws cargo run --manifest-path ~/path/to/terminal-relay/Cargo.toml -p cli -- start
+```
+
+The AI tool launches in your current working directory, not the relay repo directory.
+
 ### Feature flags
 
 | Build command                          | Includes auth? | Use case                   |
