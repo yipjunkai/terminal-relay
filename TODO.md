@@ -34,7 +34,7 @@ The path from "installed the CLI" to "session running on my phone" must be frict
 
 ## Multi-session support (competitive necessity)
 
-Termly supports multiple concurrent sessions. DISPATCH.md envisions managing multiple AI agents across worktrees from a single phone. This is referenced in 4 notes files and is the biggest feature gap vs. the direct competitor.
+Both Termly and Happy Coder support multiple concurrent sessions. DISPATCH.md envisions managing multiple AI agents across worktrees from a single phone. This is referenced in 4+ competitor analyses and remains the single biggest feature gap vs. every direct competitor.
 
 ### Phase 1: tmux integration (CLI only, ~1-2 days)
 
@@ -56,6 +56,8 @@ Relay server and mobile app need zero changes. Scoped entirely to `cli` crate.
 ## Web client (free tier acquisition channel)
 
 The business model (README.md) puts the web client in the **Free tier** and the mobile app in **Pro**. The web client is the free acquisition funnel — users try it at zero cost, then upgrade for mobile + push notifications + speech-to-code. This should not be "deferred."
+
+> **Competitor insight (Happy Coder):** Happy gets a web app (app.happy.engineering) for free from Expo/React Native — one codebase targets iOS, Android, and Web. Flutter has web support but it's less mature for terminal-heavy apps. If building the web client from scratch, xterm.js + WebCrypto is the simplest path. If considering a framework pivot for the mobile app, React Native/Expo gives web for free.
 
 - [ ] Build web client: xterm.js + WebSocket + WebCrypto. Encrypted attach, bidirectional input, terminal resize, responsive layout.
 - [ ] PWA support (manifest, service worker, home screen install) for quick access without app store.
@@ -80,7 +82,9 @@ The mobile app is the paid differentiator. Speech-to-code, push notifications, a
 
 ### Push notifications & idle detection
 
-Push notifications are a **Pro tier feature** and a competitive gap vs. Termly. Tied directly to monetization.
+Push notifications are a **Pro tier feature** and a competitive gap vs. both Termly and Happy Coder. Tied directly to monetization.
+
+> **Competitor insight:** Termly tracks `lastOutputTime` on every PTY write. If no output for 15+ seconds, status = `idle`. Reported in heartbeat pongs. Server triggers push. Happy Coder ships full encrypted push notifications via APNs/FCM — this is table stakes for the category now.
 
 - [ ] Host-side idle/busy detection: track `lastOutputTime` on every PTY write. Status = `idle` if no output for 15+ seconds. Report in heartbeat messages.
 - [ ] Push notification infrastructure: APNS (iOS) + FCM (Android) for session events (peer connected, session ended, agent idle/waiting for input).
@@ -91,9 +95,12 @@ Push notifications are a **Pro tier feature** and a competitive gap vs. Termly. 
 
 Speech-to-code is something the web client and CLI cannot replicate. This justifies the Pro tier (README.md). Needs a detailed plan, not a single line item.
 
+> **Competitor insight (Happy Coder):** Happy doesn't just transcribe speech — they run a separate Claude Sonnet instance (via ElevenLabs STT/TTS) as a **voice agent** that refines stream-of-consciousness speech into concrete, well-structured prompts. The voice agent has its own conversation context and acts as an intermediary between the user and Claude Code. This is a significantly higher bar than raw transcription.
+
 - [x] On-device speech recognition via `speech_to_text` package (iOS SFSpeechRecognizer / Android SpeechRecognizer).
 - [x] Send `VoiceCommand` messages to the host. Host writes transcript to PTY.
 - [x] Unified mic/send button in prompt bar (structured view). Mic FAB retained for terminal view. Transcript fills prompt bar for editing before send.
+- [ ] **Voice agent intermediary** — Instead of injecting raw transcription, pipe speech through an on-device or cloud LLM that refines it into a structured prompt before sending. "Uh, can you like, look at the auth thing and maybe fix the tests" → "Fix the failing authentication tests in `src/auth/`." Could run on-device (Apple Intelligence / Gemini Nano) or as a lightweight cloud call. Happy Coder validates this is what users expect.
 - [ ] Continuous listening mode with "Hey Terminal" wake word detection (on-device).
 - [ ] Voice command chaining: "Run tests, and if they pass, commit with message 'fix auth bug'" — parsed into conditional sequential commands.
 - [ ] Context-aware dictation: use current terminal context (language, framework) to improve recognition accuracy.
@@ -108,6 +115,7 @@ Speech-to-code is something the web client and CLI cannot replicate. This justif
 ### Advanced features (post-launch)
 
 - [ ] Session recording & playback (asciinema-style, built-in). Review what an agent did overnight.
+- [ ] **Server-side encrypted session history** — Happy Coder's killer feature for async workflows: start a task, go to lunch, review results from your phone hours later. Their model: per-session AES-256 DEK encrypts content, DEK is encrypted with user's content public key. Only the 32-byte DEK needs re-encryption for sharing/multi-device. Design question: grow the relay server with a persistence layer, or add a separate history service that subscribes to encrypted session events?
 - [ ] Offline command queue: queue commands while disconnected, auto-send on reconnect.
 - [ ] iOS home screen widget + Android widget showing session status and quick-action button.
 - [ ] iOS Shortcuts / Siri integration: "Hey Siri, what's my agent doing?"
@@ -131,6 +139,8 @@ Speech-to-code is something the web client and CLI cannot replicate. This justif
 
 Terminal clients use `PtyOutput` (existing). Rich mobile clients use `AgentEvent` / `AgentCommand` (new). Both go through the same encrypted relay. The `SecureMessage::Unknown` fallback provides forward compatibility. Claude Code support is live via JSONL session log tailing; other agents fall back to PTY-only.
 
+> **Competitor insight (Happy Coder):** Happy uses Claude Code's `--input-format stream-json --output-format stream-json` for a fully bidirectional JSON protocol over stdin/stdout — no PTY at all in remote mode. They also support `--permission-prompt-tool stdio` for intercepting tool approvals as structured JSON control requests/responses, enabling native Allow/Deny cards on mobile. Their "local mode" uses a `SessionScanner` that tails the JSONL log (identical to our approach) for read-only mobile viewing, then kills+respawns Claude with `--resume` + `stream-json` flags when mobile sends a message. See `HAPPY.md` for full analysis.
+
 ### Dual-channel architecture (complete for Claude Code)
 
 - [x] Define `AgentEvent` variants in `SecureMessage` enum: `SessionInit`, `TurnStarted`, `TextDelta`, `ThinkingDelta`, `TextBlock`, `ToolUseStart`, `ToolResult`, `TurnCompleted`, `SessionResult`.
@@ -151,6 +161,9 @@ Terminal clients use `PtyOutput` (existing). Rich mobile clients use `AgentEvent
 - [ ] Evaluate aligning structured message format with MCP/ACP conventions for interoperability.
 - [ ] Extend JSONL watcher to other tools that write session logs (or add tool-specific parsers).
 - [ ] Multi-turn follow-up prompts from phone (currently each prompt is independent PTY injection; no conversation threading on the structured side).
+- [ ] **Native tool-approval interception** — Happy Coder intercepts Claude's `control_request` messages (via `--permission-prompt-tool stdio`) and shows native Allow/Deny cards with tool name, description, and input preview. Currently we inject `y\r` / `n\r` into the PTY via `AgentCommand`. Investigate spawning Claude with `--permission-prompt-tool stdio` in a sidecar JSON channel so the mobile app can render proper approval cards instead of relying on PTY text prompts. This is the biggest remaining UX gap vs Happy Coder.
+- [ ] **Subagent tracking** — Happy Coder's protocol includes a `subagent` field in the event envelope for Claude Code's parallel subagent feature. Reserve a `subagent_id: Option<String>` field in `AgentEvent` so the mobile app can display parallel agent workstreams independently. Not urgent but worth reserving in the protocol before it ships widely.
+- [ ] **Happy-style mode switching** — Evaluate the kill+respawn approach: local mode (PTY, `stdio: inherit`) for desktop use, remote mode (`--input-format stream-json --resume`) for mobile control. Switching kills the Claude process and respawns in the other mode. `--resume` preserves conversation context. Pro: true bidirectional structured protocol for mobile. Con: process restart latency, only works for Claude Code, adds complexity vs our JSONL watcher which gives both simultaneously.
 
 ## Session sharing & collaboration
 
@@ -159,6 +172,14 @@ Expands the current single-viewer model into a collaboration platform. Feeds the
 - [ ] **Read-only attach mode** — `--read-only` flag for demos and presentations. Expand into per-link permission control: generate one-time share links with read-only or read-write access.
 - [ ] Session handoff: generate a link to hand a session to a teammate. They scan QR and get access with specified permissions.
 - [ ] **Session recipes** (inspired by Goose): YAML files defining tool, relay URL, args, display name. Shareable as `termrelay://` deep links or QR codes. "Scan this to connect to a Claude Code session for our monorepo."
+
+## Multi-device & key management (longer-term)
+
+> **Competitor insight (Happy Coder):** Happy uses a master secret → content key pair → per-session DEK hierarchy. The master secret lives on the phone, the content public key goes to all CLI machines. Any device with the master secret can decrypt any session. To share a session, re-encrypt the 32-byte DEK with a friend's public key — the actual content never needs re-encryption. Terminal Relay currently requires a new QR code pairing per session, with no way to access the same session from multiple devices.
+
+- [ ] **Multi-device key hierarchy** — Design a key model that allows accessing sessions from phone and tablet without per-session QR codes. Consider a hybrid: ephemeral X25519 keys for real-time PTY streams (preserves forward secrecy), plus an optional persistent identity key for session history and multi-device access (convenience). This is a fundamental crypto architecture decision — don't rush it.
+- [ ] **Hash-based session identity** (inspired by Sisyphus) — If you create a session with the same tool, args, relay URL, and working directory, it could deterministically reconnect to the existing session instead of creating a new one. Identity = hash of configuration, not a random token. Makes session resume more robust.
+- [ ] **Session import/export** — Share session recordings, configs, or state between team members. Export a session (tool config + encrypted output recording), import for review or continuation. (Sisyphus's `import_work_directory` model.)
 
 ## Tool registry & detection
 
@@ -217,15 +238,19 @@ Manual rotation is fine until there are paying users. This section is reference 
 
 ## Packaging & distribution
 
-- [ ] **npm wrapper package** — Like esbuild/turbo, publish an npm package that downloads the correct prebuilt binary. `npm install -g terminal-relay` reaches orders of magnitude more developers than current channels.
-- [ ] Self-hosting documentation: relay server setup, custom domain, TLS, auth config, enterprise customization points, mobile app white-labeling.
+> **Competitor insight:** Both Happy Coder (`npm install -g happy-coder`) and Termly (`npm install -g @termly-dev/cli`) distribute via npm. For the "AI coding tools" audience, npm is the default package manager. Happy Coder also gets a web app for free from Expo/React Native.
+
+- [ ] **Homebrew tap** — Create `yipjunkai/homebrew-terminal-relay` repo with formula pointing to GitHub Release binaries. Auto-update version and SHA256 sums on release via CI.
+- [ ] **npm wrapper package** — Like esbuild/turbo, publish an npm package that downloads the correct prebuilt binary. `npm install -g terminal-relay` reaches orders of magnitude more developers than current channels. Both direct competitors validate this channel.
+- [ ] Self-hosting documentation: relay server setup, custom domain, TLS, auth config, enterprise customization points, mobile app white-labeling. (Goose has thorough `CUSTOM_DISTROS.md` for reference.)
+- [ ] **TypeScript/JSON protocol spec** — If Terminal Relay's protocol needs to be consumed by non-Rust clients (web app, third-party integrations), publish the protocol types as a TypeScript package or JSON schema. Happy Coder does this with `@slopus/happy-wire` (Zod schemas). Lower priority than web client but enables ecosystem.
 - [ ] Protocol spec, architecture overview in `docs/`.
 - [x] Prebuilt binaries (macOS Intel + Apple Silicon, Linux x64 + ARM64) via GitHub Actions.
 - [x] Homebrew formula (`brew install yipjunkai/terminal-relay/terminal-relay`).
 - [x] Install script (`curl -fsSL ... | sh`).
 - [ ] `cargo install terminal-relay` (publish to crates.io). Lower priority than npm.
-- [ ] Windows PTY support and CI coverage.
-- [ ] Structured observability (OpenTelemetry tracing for relay, metrics for latency/errors/capacity).
+- [ ] Windows PTY support and CI coverage. (Termly has explicit Windows optimizations: PTY output deduplication within ~150ms, escape sequence normalization for mobile.)
+- [ ] Structured observability (OpenTelemetry tracing for relay, metrics for latency/errors/capacity). Goose uses PostHog + OpenTelemetry + Langfuse.
 - [ ] Opt-in anonymous usage telemetry (session count, tool usage, OS).
 
 ## Code quality
@@ -238,7 +263,9 @@ Manual rotation is fine until there are paying users. This section is reference 
 
 ## Competitive positioning
 
-Terminal Relay's advantages vs. Termly (the direct competitor) that should be emphasized in docs and marketing:
+Terminal Relay's advantages vs. the field — emphasized in docs and marketing:
+
+### vs. Termly (direct PTY competitor, 141 stars)
 
 | Area                | Terminal Relay                   | Termly                        |
 | ------------------- | -------------------------------- | ----------------------------- |
@@ -250,10 +277,40 @@ Terminal Relay's advantages vs. Termly (the direct competitor) that should be em
 | Wire format         | MessagePack (compact)            | JSON (verbose)                |
 | Language            | Rust (single binary, low memory) | Node.js (requires runtime)    |
 | Protocol versioning | Range negotiation                | Server minimum only           |
-| Test suite          | 161 tests                        | None                          |
+| Test suite          | 161+ tests                       | None                          |
+| Structured events   | Yes (AgentEvent/AgentCommand)    | No                            |
+| Voice input         | Yes (on-device STT)              | No                            |
+| Desktop takeover    | Yes (Enter/double-Esc)           | No                            |
+
+Terminal Relay now significantly outclasses Termly on features. Remaining Termly advantages: multi-session, push notifications, npm distribution, Windows support.
+
+### vs. Happy Coder (primary competitor, 15.8k stars)
+
+| Area                 | Terminal Relay                            | Happy Coder                    |
+| -------------------- | ----------------------------------------- | ------------------------------ |
+| Agent agnosticism    | Any CLI tool via PTY                      | Claude Code, Codex, Gemini only (per-agent parsers) |
+| Forward secrecy      | Yes (ephemeral X25519)                    | No (master secret decrypts all) |
+| Replay protection    | Monotonic nonce + sliding window          | Not documented                 |
+| Server storage       | Zero (in-memory relay)                    | Encrypted blobs in Postgres    |
+| Crypto test suite    | 51+ crypto tests, cross-platform vectors  | Minimal                        |
+| Performance          | Rust single binary                        | Node.js                        |
+| Structured events    | Yes (JSONL watcher + native mobile UI)    | Yes (stdin/stdout JSON)        |
+| Desktop takeover     | Yes (TUI + PTY attach)                    | Yes (any key reclaims)         |
+| Voice input          | Yes (on-device STT)                       | Yes (ElevenLabs + Claude Sonnet intermediary) |
+| Multi-session        | No (single CLI session)                   | Yes                            |
+| Push notifications   | Protocol types only                       | Shipped (APNs/FCM)            |
+| Session history      | Mobile-only (local)                       | Server-side (encrypted blobs)  |
+| npm distribution     | No                                        | Yes                            |
+| Web app              | No                                        | Yes (Expo web)                 |
+| Multi-device keys    | Per-session pairing                       | Master secret hierarchy        |
+| Permission prompts   | PTY injection (`y\r`/`n\r`)               | Native Allow/Deny cards        |
+
+Terminal Relay has closed the structured events, desktop takeover, and voice input gaps. Remaining Happy Coder advantages: multi-session, push notifications, server-side history, npm, web app, native permission UI, intelligent voice agent, multi-device keys.
 
 - [ ] Benchmark and document security advantages in a comparison page.
 - [ ] Security whitepaper: protocol spec with crypto rationale.
+- [ ] Prepare competitive positioning messaging against Happy Coder's "everything is free and open source" angle. Counter: sustainable business model, stronger crypto, agent-agnostic, lighter server.
+- [ ] Monitor Happy Coder's traction and feature development closely — this is the primary competitor with 15.8k stars and 44 contributors.
 
 ---
 

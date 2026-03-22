@@ -22,14 +22,14 @@ Your Machine                         Cloud                          Your Phone
 ## Install
 
 ```bash
-# macOS (Homebrew)
-brew install yipjunkai/terminal-relay/terminal-relay
-
-# macOS / Linux (script)
+# macOS / Linux (recommended)
 curl -fsSL https://raw.githubusercontent.com/yipjunkai/terminal-relay/main/install.sh | sh
 
 # From source
-cargo install --git https://github.com/yipjunkai/terminal-relay --package cli
+cargo install --git https://github.com/yipjunkai/terminal-relay -p cli
+
+# Docker (relay server only)
+docker pull ghcr.io/yipjunkai/terminal-relay:latest
 ```
 
 ## Quick start
