@@ -13,29 +13,29 @@ class TerminalRelay < Formula
   desc "Mirror local AI terminal sessions to remote clients with E2E encryption"
   homepage "https://github.com/yipjunkai/terminal-relay"
   license any_of: ["MIT", "Apache-2.0"]
-  version "0.1.0"
+  version "0.2.0"
 
   on_macos do
     on_intel do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "60934797714e512396ccc9421822f3e4bb371fdff7596ce0bfe9a2d26f239a31"
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.2.0/terminal-relay-v0.2.0-x86_64-apple-darwin.tar.gz"
+      sha256 "262e9138c7fde99bfddd22ea2aeb6fd4ce81d7095ad7a1cfe590dde8ffc0b2c0"
     end
 
     on_arm do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "dc0e2c276fe3e0e9f5a58fb64c122b5d2d308a1a8e1ca84c63271a1ac7738e39"
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.2.0/terminal-relay-v0.2.0-aarch64-apple-darwin.tar.gz"
+      sha256 "9f448dcaca57911cb2daba012421361a5e0a7959a686ccfd6bb2a51a71a9d1a2"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "5a39134344ec1ec0f770b89f3d9ce0e2cd737daa409ba654103ce97bc9b4f6ad"
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.2.0/terminal-relay-v0.2.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "c682744bc67f3f0d48752a871f92c554ba7e36e323b45d232648056183a02c3a"
     end
 
     on_arm do
-      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.1.0/terminal-relay-v0.1.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "bd19b043e48ec8c74f1e2a3d7af71490324a87b2a564f595796c5d62786f5f1b"
+      url "https://github.com/yipjunkai/terminal-relay/releases/download/v0.2.0/terminal-relay-v0.2.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "162d462eb14f538c849fe9659e4ec3bc988cd4bbace989b8bcc6104ab4b7cb03"
     end
   end
 
