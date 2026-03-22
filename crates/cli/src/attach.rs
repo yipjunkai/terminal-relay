@@ -376,6 +376,8 @@ async fn handle_route(
                 | SecureMessage::Clipboard { .. }
                 | SecureMessage::ReadOnly { .. }
                 | SecureMessage::VoiceCommand(_)
+                | SecureMessage::AgentEvent(_)
+                | SecureMessage::AgentCommand(_)
                 | SecureMessage::Unknown(_) => {}
             }
         }

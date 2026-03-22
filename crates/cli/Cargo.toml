@@ -51,6 +51,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 toml = "0.8"
 which = "8.0"
 zeroize = "1.8"
+notify = { version = "7.0", default-features = false, features = ["macos_kqueue"] }
 protocol = { path = "../protocol" }
 
 # Hosted-service dependencies (optional, enabled by the "hosted" feature).

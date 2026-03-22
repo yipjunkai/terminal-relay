@@ -6,9 +6,11 @@ mod common;
 mod config;
 mod constants;
 mod host;
+mod jsonl_watcher;
 mod pty;
 mod relay_client;
 mod state;
+mod structured;
 mod tui;
 
 use std::path::PathBuf;

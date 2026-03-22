@@ -170,8 +170,11 @@ impl Tui {
         Ok(())
     }
 
-    /// Poll for a terminal event with a timeout. Returns true if the user wants to quit.
-    pub fn poll_quit(&self, timeout: std::time::Duration) -> anyhow::Result<bool> {
+    /// Poll for a terminal event with a timeout.
+    /// Returns `TuiAction::Quit` if the user wants to quit,
+    /// `TuiAction::Takeover` if they want to take over the PTY,
+    /// or `TuiAction::None` otherwise.
+    pub fn poll_action(&self, timeout: std::time::Duration) -> anyhow::Result<TuiAction> {
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('q')
@@ -179,12 +182,39 @@ impl Tui {
                     || (key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
-                    return Ok(true);
+                    return Ok(TuiAction::Quit);
+                }
+                if key.code == KeyCode::Enter {
+                    return Ok(TuiAction::Takeover);
                 }
             }
         }
-        Ok(false)
+        Ok(TuiAction::None)
     }
+
+    /// Suspend the TUI: leave alternate screen so the real terminal is visible.
+    /// Call `resume()` to restore.
+    pub fn suspend(&mut self) -> anyhow::Result<()> {
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    /// Resume the TUI: re-enter alternate screen and raw mode.
+    pub fn resume(&mut self) -> anyhow::Result<()> {
+        enable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        self.terminal.clear()?;
+        Ok(())
+    }
+}
+
+/// Actions returned by `poll_action`.
+pub enum TuiAction {
+    None,
+    Quit,
+    Takeover,
 }
 
 impl Drop for Tui {
@@ -418,21 +448,31 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TuiState) {
         &state.info.fingerprint
     };
 
-    let line = Line::from(vec![
+    let left = Line::from(vec![
         Span::styled(" q ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
         Span::styled(" quit  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            " fp ",
+            " Enter ",
+            Style::default().fg(Color::Black).bg(Color::DarkGray),
+        ),
+        Span::styled(" takeover ", Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let right = Line::from(vec![
+        Span::styled(
+            " fingerprint ",
             Style::default().fg(Color::Black).bg(Color::DarkGray),
         ),
         Span::styled(
-            format!(" {fingerprint_short}  "),
+            format!(" {fingerprint_short} "),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
 
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, area);
+    let left_widget = Paragraph::new(left);
+    let right_widget = Paragraph::new(right).alignment(ratatui::layout::Alignment::Right);
+    frame.render_widget(left_widget, area);
+    frame.render_widget(right_widget, area);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

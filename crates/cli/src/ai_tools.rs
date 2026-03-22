@@ -17,6 +17,8 @@ pub struct ToolCommand {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    /// Whether this tool supports `--output-format stream-json` for structured events.
+    pub supports_structured: bool,
 }
 
 /// Known AI tools with their binary names and default arguments.
@@ -48,10 +50,12 @@ pub fn detect_known_tools() -> Vec<ToolCandidate> {
 
 /// Resolve a tool by name or config default. If neither is set and no default
 /// exists in config, show an interactive picker (first-run experience).
-pub fn resolve_tool(tool: Option<&str>, extra_args: &[String]) -> anyhow::Result<ToolCommand> {
+///
+/// `tool_name` is the first positional arg (if any), `extra_args` are the rest.
+pub fn resolve_tool(tool_name: Option<&str>, extra_args: &[String]) -> anyhow::Result<ToolCommand> {
     let tools = detect_known_tools();
 
-    let chosen = match tool {
+    let chosen = match tool_name {
         Some(name) => resolve_by_name(name, &tools)?,
         None => {
             // Check config for a saved default.
@@ -70,6 +74,7 @@ pub fn resolve_tool(tool: Option<&str>, extra_args: &[String]) -> anyhow::Result
     Ok(ToolCommand {
         name: chosen.name,
         command: chosen.command,
+        supports_structured: chosen.supports_structured,
         args,
     })
 }
@@ -87,6 +92,7 @@ fn resolve_by_name(name: &str, tools: &[ToolCandidate]) -> anyhow::Result<ToolCo
             name: candidate.name.clone(),
             command: candidate.command.clone(),
             args: candidate.args.clone(),
+            supports_structured: tool_supports_structured(&candidate.name),
         })
     } else {
         // Unknown name — treat as a raw command.
@@ -103,6 +109,7 @@ fn resolve_by_name(name: &str, tools: &[ToolCandidate]) -> anyhow::Result<ToolCo
             name: cmd.to_string(),
             command: cmd.to_string(),
             args: cmd_args.iter().map(|s| s.to_string()).collect(),
+            supports_structured: false,
         })
     }
 }
@@ -140,6 +147,7 @@ fn pick_and_save_default(tools: &[ToolCandidate]) -> anyhow::Result<ToolCommand>
             name: tool.name.clone(),
             command: tool.command.clone(),
             args: tool.args.clone(),
+            supports_structured: tool_supports_structured(&tool.name),
         });
     }
 
@@ -252,7 +260,14 @@ fn pick_and_save_default(tools: &[ToolCandidate]) -> anyhow::Result<ToolCommand>
         name: tool.name.clone(),
         command: tool.command.clone(),
         args: tool.args.clone(),
+        supports_structured: tool_supports_structured(&tool.name),
     })
+}
+
+/// Returns `true` if a known tool supports structured JSON output
+/// (`--output-format stream-json` for Claude Code).
+pub fn tool_supports_structured(name: &str) -> bool {
+    matches!(name, "claude")
 }
 
 fn save_default(tool_name: &str) -> anyhow::Result<()> {

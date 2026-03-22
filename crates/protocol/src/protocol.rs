@@ -120,6 +120,70 @@ pub struct VoiceAction {
     pub confidence: f32,
 }
 
+// ── Structured agent events (for rich clients) ──
+
+/// Structured events emitted by an AI agent (e.g., Claude Code with `--output-format stream-json`).
+/// Rich clients render these as native UI; terminal clients can ignore them via `Unknown` fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentEvent {
+    /// Agent session initialized with model info and available tools.
+    SessionInit {
+        session_id: String,
+        model: String,
+        tools: Vec<String>,
+    },
+    /// Agent started a new turn (processing a prompt).
+    TurnStarted,
+    /// Streaming text content delta from the agent.
+    TextDelta { text: String },
+    /// Streaming thinking/reasoning content delta.
+    ThinkingDelta { text: String },
+    /// Complete text block from the agent (sent after all deltas for a block).
+    TextBlock { text: String },
+    /// Agent is invoking a tool.
+    ToolUseStart {
+        /// Unique tool invocation ID (for correlating with ToolResult).
+        id: String,
+        /// Tool name (e.g. "Read", "Edit", "Bash").
+        name: String,
+        /// Tool invocation arguments as a JSON string.
+        input: String,
+    },
+    /// Tool execution completed with a result.
+    ToolResult {
+        /// Matches the `id` from `ToolUseStart`.
+        id: String,
+        /// Tool output content.
+        content: String,
+        /// Whether the tool execution errored.
+        is_error: bool,
+    },
+    /// Agent turn completed.
+    TurnCompleted {
+        /// "completed", "failed", or "cancelled".
+        status: String,
+    },
+    /// Final session result (agent finished all work).
+    SessionResult {
+        /// Final text result from the agent.
+        result: String,
+        is_error: bool,
+        duration_ms: u64,
+        num_turns: u32,
+    },
+}
+
+/// Commands sent from a rich client to control the agent session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentCommand {
+    /// Send a text prompt to the agent.
+    Prompt { text: String },
+    /// Approve a pending tool invocation.
+    ApproveToolUse { id: String },
+    /// Deny a pending tool invocation.
+    DenyToolUse { id: String, reason: Option<String> },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecureMessage {
     // ── Core variants ──
@@ -150,6 +214,17 @@ pub enum SecureMessage {
     },
     /// Voice command from a mobile client, transcribed on-device.
     VoiceCommand(VoiceAction),
+
+    // ── Structured agent channel ──
+    /// Structured event from an AI agent (e.g., text deltas, tool calls, turn lifecycle).
+    /// Sent by the host when running an agent in structured mode alongside or instead of PTY.
+    /// Terminal clients will receive this as `Unknown` and silently ignore it.
+    /// Rich clients render these as native UI components.
+    AgentEvent(AgentEvent),
+    /// Command from a rich client to control the agent session (prompts, tool approvals).
+    /// Terminal clients never send these. PTY-mode hosts ignore them via the catch-all.
+    AgentCommand(AgentCommand),
+
     /// Unknown message from a newer protocol version. Receivers should silently ignore this.
     /// This must remain the LAST variant.
     Unknown(Vec<u8>),
@@ -400,6 +475,114 @@ mod tests {
     #[test]
     fn secure_unknown_roundtrip() {
         secure_msg_roundtrip(&SecureMessage::Unknown(vec![1, 2, 3]));
+    }
+
+    // ── AgentEvent roundtrip tests ──
+
+    #[test]
+    fn secure_agent_event_session_init_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::SessionInit {
+            session_id: "abc-123".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            tools: vec!["Read".to_string(), "Edit".to_string(), "Bash".to_string()],
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_turn_started_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TurnStarted));
+    }
+
+    #[test]
+    fn secure_agent_event_text_delta_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TextDelta {
+            text: "Hello, ".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_thinking_delta_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::ThinkingDelta {
+            text: "Let me analyze...".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_text_block_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TextBlock {
+            text: "The answer is 42.".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_tool_use_start_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::ToolUseStart {
+            id: "toolu_abc123".to_string(),
+            name: "Read".to_string(),
+            input: r#"{"file_path":"/src/main.rs"}"#.to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_tool_result_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::ToolResult {
+            id: "toolu_abc123".to_string(),
+            content: "fn main() { ... }".to_string(),
+            is_error: false,
+        }));
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::ToolResult {
+            id: "toolu_err456".to_string(),
+            content: "file not found".to_string(),
+            is_error: true,
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_turn_completed_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TurnCompleted {
+            status: "completed".to_string(),
+        }));
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TurnCompleted {
+            status: "failed".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_session_result_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::SessionResult {
+            result: "Done! Fixed the bug.".to_string(),
+            is_error: false,
+            duration_ms: 5432,
+            num_turns: 3,
+        }));
+    }
+
+    // ── AgentCommand roundtrip tests ──
+
+    #[test]
+    fn secure_agent_command_prompt_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentCommand(AgentCommand::Prompt {
+            text: "Fix the bug in auth.rs".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_command_approve_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentCommand(AgentCommand::ApproveToolUse {
+            id: "toolu_abc123".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_command_deny_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentCommand(AgentCommand::DenyToolUse {
+            id: "toolu_abc123".to_string(),
+            reason: Some("Too dangerous".to_string()),
+        }));
+        secure_msg_roundtrip(&SecureMessage::AgentCommand(AgentCommand::DenyToolUse {
+            id: "toolu_abc456".to_string(),
+            reason: None,
+        }));
     }
 
     #[test]

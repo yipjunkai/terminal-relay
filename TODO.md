@@ -67,7 +67,8 @@ The mobile app is the paid differentiator. Speech-to-code, push notifications, a
 
 ### Immediate UX improvements
 
-- [ ] **Smart input bar** — Compose input field above the keyboard with send button, draft saving, history recall. Typing directly into a terminal on mobile is painful — this is the single biggest UX improvement possible.
+- [x] **Smart input bar** — Unified prompt bar with Telegram-style mic/send toggle button. Structured view for Claude Code with native UI cards (thinking, tool calls, text blocks, turn markers). Busy indicator disables input during agent turns. STT fills the prompt bar for editing before send.
+- [ ] Draft saving, history recall in prompt bar.
 - [ ] Reconnect overlay when connection drops (error message + reconnect/close buttons, not just a small icon).
 - [ ] Landscape orientation support for more terminal columns.
 - [ ] Terminal themes and customization (Dracula, Solarized, Nord, Catppuccin, custom fonts).
@@ -90,8 +91,9 @@ Push notifications are a **Pro tier feature** and a competitive gap vs. Termly. 
 
 Speech-to-code is something the web client and CLI cannot replicate. This justifies the Pro tier (README.md). Needs a detailed plan, not a single line item.
 
-- [ ] Platform channels to iOS `SFSpeechRecognizer` / Android ML Kit for on-device recognition.
-- [ ] Send `VoiceCommand` messages to the host (protocol already has the variant).
+- [x] On-device speech recognition via `speech_to_text` package (iOS SFSpeechRecognizer / Android SpeechRecognizer).
+- [x] Send `VoiceCommand` messages to the host. Host writes transcript to PTY.
+- [x] Unified mic/send button in prompt bar (structured view). Mic FAB retained for terminal view. Transcript fills prompt bar for editing before send.
 - [ ] Continuous listening mode with "Hey Terminal" wake word detection (on-device).
 - [ ] Voice command chaining: "Run tests, and if they pass, commit with message 'fix auth bug'" — parsed into conditional sequential commands.
 - [ ] Context-aware dictation: use current terminal context (language, framework) to improve recognition accuracy.
@@ -99,7 +101,7 @@ Speech-to-code is something the web client and CLI cannot replicate. This justif
 ### Gesture & interaction improvements
 
 - [ ] Gesture-based terminal control: swipe-left for Ctrl-C, swipe-up for scroll-back, pinch-to-zoom for font size.
-- [ ] Radial/pie menu on long-press for most-used actions (interrupt, clear, paste, resize).
+- [x] Bottom sheet terminal actions: Interrupt, EOF, Suspend, Clear, arrow navigation, Tab, Esc, Paste, Search. Grouped by category with icons. Replaces the old inline toolbar.
 - [ ] Prompt templates / quick commands: user-defined snippets ("fix the failing tests", "explain this error"). Tap to send.
 - [ ] Haptic + audio feedback for agent state changes (distinct vibration patterns for thinking, waiting, finished, disconnected).
 
@@ -125,23 +127,30 @@ Speech-to-code is something the web client and CLI cannot replicate. This justif
 - [ ] Widget tests for terminal screen and status bar states.
 - [ ] Integration test: mock WebSocket server that replays a captured Rust handshake, verify Dart client completes handshake and decrypts output.
 
-## Structured agent interface (exploratory — long-term differentiator)
+## Structured agent interface
 
-This is the fork that turns Terminal Relay from "remote terminal" into "remote agent interface." Raw PTY bytes work for terminal mirroring but are insufficient for rich mobile UX (native tool approvals, thinking indicators, code diffs). Identified independently in BOWLINE.md and GOOSE.md competitive analyses.
+Terminal clients use `PtyOutput` (existing). Rich mobile clients use `AgentEvent` / `AgentCommand` (new). Both go through the same encrypted relay. The `SecureMessage::Unknown` fallback provides forward compatibility. Claude Code support is live via JSONL session log tailing; other agents fall back to PTY-only.
 
-### Dual-channel architecture
+### Dual-channel architecture (complete for Claude Code)
 
-Terminal clients use `PtyOutput` (existing). Rich mobile clients use `AgentEvent` / `AgentCommand` (new). Both go through the same encrypted relay. The existing `SecureMessage::Unknown` fallback provides forward compatibility.
+- [x] Define `AgentEvent` variants in `SecureMessage` enum: `SessionInit`, `TurnStarted`, `TextDelta`, `ThinkingDelta`, `TextBlock`, `ToolUseStart`, `ToolResult`, `TurnCompleted`, `SessionResult`.
+- [x] Define `AgentCommand` variants: `Prompt`, `ApproveToolUse`, `DenyToolUse`.
+- [x] JSONL session log watcher (`jsonl_watcher.rs`): tails `~/.claude/projects/<hash>/<sessionId>.jsonl` via `notify` (kqueue), parses events, emits `AgentEvent` alongside PTY output. Turn completion detected via `stop_reason: "end_turn"`.
+- [x] Dual-channel host mode: PTY stream for terminal clients + parsed event stream for rich clients, both through the same encrypted relay simultaneously.
+- [x] Dart protocol: full MessagePack encode/decode for all `AgentEvent` and `AgentCommand` variants with forward-compatible unit variant handling.
+- [x] PTY injection: `AgentCommand::Prompt` → `pty.send_input(text + \r)`, `ApproveToolUse` → `y\r`, `DenyToolUse` → `n\r`.
+- [x] Takeover mode: Enter to attach desktop to PTY, double-tap Esc to return to dashboard. Resize forwarding, Ctrl+L redraw. Both desktop and phone can write simultaneously.
+- [x] Tool result truncation (32KB cap) to prevent huge payloads over the relay.
+- [x] 13 protocol roundtrip tests for new variants, 7 JSONL parser tests.
 
-- [ ] Define `AgentEvent` and `AgentCommand` variants in `SecureMessage` enum: `TurnStarted`, `ContentDelta`, `ToolUse`, `ToolApprovalRequired`, `ToolResult`, `TurnCompleted`.
-- [ ] Define `AgentCommand` variants: `Prompt`, `ApproveToolUse`, `DenyToolUse`.
-- [ ] Prototype Claude Code structured output parsing (`--output-format stream-json`) on the host side.
-- [ ] Design dual-channel host mode: PTY stream for terminal clients + parsed event stream for rich clients.
+### Remaining
+
 - [ ] Investigate ACP (Agent Client Protocol) as a structured communication alternative to PTY for compatible agents (Goose, potentially Claude Code, Codex).
-- [ ] Mobile: approval queue as native UI (approve/reject buttons instead of typing y/n in terminal).
 - [ ] Mobile: structured diff viewer with syntax highlighting for agent-produced diffs.
 - [ ] Mobile: task timeline / activity feed ("Modified 3 files", "Ran tests (2 failed)", "Waiting for approval").
 - [ ] Evaluate aligning structured message format with MCP/ACP conventions for interoperability.
+- [ ] Extend JSONL watcher to other tools that write session logs (or add tool-specific parsers).
+- [ ] Multi-turn follow-up prompts from phone (currently each prompt is independent PTY injection; no conversation threading on the structured side).
 
 ## Session sharing & collaboration
 
@@ -269,8 +278,8 @@ Terminal Relay's advantages vs. Termly (the direct competitor) that should be em
 
 ### Phase 3: Protocol extensions (complete)
 
-- [x] New `SecureMessage` variants: `SessionEnded`, `Clipboard`, `ReadOnly`, `VoiceCommand`.
-- [x] Forward-compatible extensibility (`Unknown` fallback).
+- [x] New `SecureMessage` variants: `SessionEnded`, `Clipboard`, `ReadOnly`, `VoiceCommand`, `AgentEvent`, `AgentCommand`.
+- [x] Forward-compatible extensibility (`Unknown` fallback). Dart handles unit variants (strings) gracefully.
 - [x] Protocol version range negotiation (v1-v2).
 - [x] MessagePack wire format with named keys.
 - [x] `--command` flag, CWD inheritance, compact QR codes.
