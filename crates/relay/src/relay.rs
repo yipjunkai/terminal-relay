@@ -926,3 +926,215 @@ fn generate_resume_token() -> String {
         .take(RESUME_TOKEN_LENGTH)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_register_request() -> RegisterRequest {
+        RegisterRequest {
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            pairing_code: "ABCDEF-GHIJKL-MNOPQR".to_string(),
+            role: PeerRole::Host,
+            protocol_version: PROTOCOL_VERSION,
+            protocol_version_min: Some(PROTOCOL_VERSION_MIN),
+            client_version: "0.1.0".to_string(),
+            resume_token: None,
+        }
+    }
+
+    // ── is_valid_pairing_code ────────────────────────────────────────
+
+    #[test]
+    fn pairing_code_valid_uppercase() {
+        assert!(is_valid_pairing_code("ABCDEF-GHIJKL-MNOPQR"));
+    }
+
+    #[test]
+    fn pairing_code_valid_with_digits() {
+        assert!(is_valid_pairing_code("ABC123-DEF456-GHI789"));
+    }
+
+    #[test]
+    fn pairing_code_lowercase_rejected() {
+        assert!(!is_valid_pairing_code("abcdef-ghijkl-mnopqr"));
+    }
+
+    #[test]
+    fn pairing_code_wrong_segment_count() {
+        assert!(!is_valid_pairing_code("ABCDEF-GHIJKL"));
+    }
+
+    #[test]
+    fn pairing_code_wrong_segment_length() {
+        assert!(!is_valid_pairing_code("ABCDE-FGHIJK-LMNOPQ"));
+    }
+
+    #[test]
+    fn pairing_code_empty() {
+        assert!(!is_valid_pairing_code(""));
+    }
+
+    #[test]
+    fn pairing_code_special_chars() {
+        assert!(!is_valid_pairing_code("ABC!EF-GHI@KL-MNO#QR"));
+    }
+
+    // ── validate_register_request ────────────────────────────────────
+
+    #[test]
+    fn register_request_valid() {
+        assert!(validate_register_request(&valid_register_request()).is_ok());
+    }
+
+    #[test]
+    fn register_request_invalid_uuid() {
+        let mut req = valid_register_request();
+        req.session_id = "not-a-uuid".to_string();
+        let err = validate_register_request(&req).unwrap_err();
+        assert!(matches!(err, SessionError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn register_request_long_session_id() {
+        let mut req = valid_register_request();
+        req.session_id = "a".repeat(MAX_SESSION_ID_LEN + 1);
+        assert!(validate_register_request(&req).is_err());
+    }
+
+    #[test]
+    fn register_request_long_pairing_code() {
+        let mut req = valid_register_request();
+        req.pairing_code = "A".repeat(MAX_PAIRING_CODE_LEN + 1);
+        assert!(validate_register_request(&req).is_err());
+    }
+
+    #[test]
+    fn register_request_bad_pairing_format() {
+        let mut req = valid_register_request();
+        req.pairing_code = "invalid-format".to_string();
+        assert!(validate_register_request(&req).is_err());
+    }
+
+    #[test]
+    fn register_request_long_client_version() {
+        let mut req = valid_register_request();
+        req.client_version = "x".repeat(MAX_CLIENT_VERSION_LEN + 1);
+        assert!(validate_register_request(&req).is_err());
+    }
+
+    #[test]
+    fn register_request_long_resume_token() {
+        let mut req = valid_register_request();
+        req.resume_token = Some("t".repeat(MAX_RESUME_TOKEN_LEN + 1));
+        assert!(validate_register_request(&req).is_err());
+    }
+
+    #[test]
+    fn register_request_valid_with_resume_token() {
+        let mut req = valid_register_request();
+        req.resume_token = Some("valid-token-123".to_string());
+        assert!(validate_register_request(&req).is_ok());
+    }
+
+    // ── SessionError Display ─────────────────────────────────────────
+
+    #[test]
+    fn session_error_display_contains_relevant_info() {
+        let err = SessionError::UserLimitReached { tier: "free".into(), current: 3, max: 3 };
+        let msg = err.to_string();
+        assert!(msg.contains("free"), "should mention tier: {msg}");
+        assert!(msg.contains("3"), "should mention count: {msg}");
+
+        let err = SessionError::ProtocolMismatch { client_range: "1-2".into(), server_range: "1-2".into() };
+        assert!(err.to_string().contains("1-2"));
+
+        let err = SessionError::AlreadyConnected { role: PeerRole::Host };
+        assert!(err.to_string().contains("Host"));
+
+        // Verify all variants produce non-empty messages
+        let all_errors: Vec<SessionError> = vec![
+            SessionError::AtCapacity { current: 10, max: 10 },
+            SessionError::IpLimitReached { ip: "127.0.0.1".parse().unwrap(), current: 5, max: 5 },
+            SessionError::SessionLocked,
+            SessionError::PairingMismatch,
+            SessionError::SessionNotFound,
+            SessionError::InvalidResumeToken { role: PeerRole::Client },
+            SessionError::PeerOffline,
+            SessionError::ChannelFull,
+            SessionError::ClientVersionInvalid("bad".into()),
+            SessionError::InvalidRequest("bad".into()),
+        ];
+        for err in &all_errors {
+            assert!(!err.to_string().is_empty(), "empty Display for {:?}", err);
+        }
+    }
+
+    #[test]
+    fn session_error_at_capacity_contains_counts() {
+        let err = SessionError::AtCapacity { current: 42, max: 50 };
+        let msg = err.to_string();
+        assert!(msg.contains("42"), "missing current count: {msg}");
+        assert!(msg.contains("50"), "missing max count: {msg}");
+    }
+
+    // ── tier_limit / TierLimits ──────────────────────────────────────
+
+    #[test]
+    fn tier_limits_default() {
+        let limits = TierLimits::default();
+        assert_eq!(limits.free, 3);
+        assert_eq!(limits.pro, 20);
+    }
+
+    #[test]
+    fn tier_limit_returns_correct_values() {
+        let state = test_relay_state();
+        assert_eq!(state.tier_limit("free"), 3);
+        assert_eq!(state.tier_limit("pro"), 20);
+    }
+
+    #[test]
+    fn tier_limit_unknown_defaults_to_free() {
+        let state = test_relay_state();
+        assert_eq!(state.tier_limit("enterprise"), state.tier_limit("free"));
+    }
+
+    // ── generate_resume_token ────────────────────────────────────────
+
+    #[test]
+    fn resume_token_correct_length() {
+        let token = generate_resume_token();
+        assert_eq!(token.len(), RESUME_TOKEN_LENGTH);
+    }
+
+    #[test]
+    fn resume_token_alphanumeric() {
+        let token = generate_resume_token();
+        assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn resume_tokens_are_unique() {
+        let tokens: std::collections::HashSet<String> =
+            (0..100).map(|_| generate_resume_token()).collect();
+        assert_eq!(tokens.len(), 100);
+    }
+
+    // ── Helper ───────────────────────────────────────────────────────
+
+    fn test_relay_state() -> RelayState {
+        RelayState::new(
+            "0.1.0".to_string(),
+            Duration::from_secs(300),
+            100,
+            10,
+            TierLimits::default(),
+            Arc::new(
+                AuthState::new("test-secret".to_string(), None, None, None)
+                    .expect("test AuthState"),
+            ),
+        )
+        .expect("test RelayState")
+    }
+}

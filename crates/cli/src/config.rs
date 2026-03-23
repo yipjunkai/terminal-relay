@@ -69,3 +69,28 @@ fn config_path() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().context("failed resolving home directory")?;
     Ok(home.join(STATE_DIR_NAME).join(CONFIG_FILE))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_roundtrip_toml() {
+        let config = Config {
+            default_tool: Some("claude".to_string()),
+            #[cfg(feature = "hosted")]
+            api_key: Some("test-key".to_string()),
+            #[cfg(feature = "hosted")]
+            control_api_url: None,
+        };
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.default_tool, Some("claude".to_string()));
+    }
+
+    #[test]
+    fn config_deserializes_empty_toml() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.default_tool.is_none());
+    }
+}

@@ -384,6 +384,9 @@ mod tests {
         store.save(&sample_record("b")).unwrap();
         let records = store.list().unwrap();
         assert_eq!(records.len(), 2);
+        let mut ids: Vec<String> = records.iter().map(|r| r.session_id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 
     #[test]
@@ -429,5 +432,65 @@ mod tests {
         fs::write(&path, &garbage).unwrap();
 
         assert!(store.load("corrupt").is_err());
+    }
+
+    #[test]
+    fn encrypted_file_too_short_returns_error() {
+        let (dir, store) = temp_store();
+        let path = dir.path().join("sessions/short.json");
+        // Magic header but no nonce (less than 16 bytes total)
+        let mut data = ENCRYPTED_MAGIC.to_vec();
+        data.extend_from_slice(&[0u8; 4]); // only 8 bytes total, need 16
+        fs::write(&path, &data).unwrap();
+
+        let err = store.load("short").unwrap_err();
+        assert!(matches!(err, StateError::FileTooShort));
+    }
+
+    #[test]
+    fn load_nonexistent_session_returns_io_error() {
+        let (_dir, store) = temp_store();
+        let err = store.load("nonexistent").unwrap_err();
+        assert!(matches!(err, StateError::Io { .. }));
+    }
+
+    #[test]
+    fn session_record_debug_redacts_secrets() {
+        let record = sample_record("redact-test");
+        let debug_output = format!("{:?}", record);
+        assert!(debug_output.contains("[REDACTED]"));
+        // Ensure actual key bytes don't appear as decimal arrays
+        assert!(!debug_output.contains("[2, 2, 2"));
+        assert!(!debug_output.contains("[1, 1, 1"));
+    }
+
+    #[test]
+    fn state_error_display_contains_context() {
+        let io_err = StateError::Io {
+            context: "reading key".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        };
+        assert!(io_err.to_string().contains("reading key"));
+
+        let key_err = StateError::InvalidKeyLength { actual: 16 };
+        assert!(key_err.to_string().contains("16"));
+
+        let decrypt_err = StateError::DecryptionFailed;
+        assert!(
+            decrypt_err.to_string().contains("wrong key")
+                || decrypt_err.to_string().contains("corrupted")
+        );
+    }
+
+    #[test]
+    fn invalid_key_length_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pre-create directory structure
+        fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        // Write a state.key with wrong length
+        fs::write(dir.path().join("state.key"), &[0u8; 16]).unwrap();
+
+        let err = SessionStore::new(dir.path().to_path_buf()).unwrap_err();
+        assert!(matches!(err, StateError::InvalidKeyLength { actual: 16 }));
     }
 }

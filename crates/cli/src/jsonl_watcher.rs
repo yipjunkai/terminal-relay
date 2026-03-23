@@ -414,7 +414,73 @@ mod tests {
 
     #[test]
     fn project_dir_computation() {
-        // Just verify the function doesn't panic.
-        let _ = find_project_dir();
+        // Verify the function doesn't panic and returns a usable result.
+        // It depends on HOME and CWD, so we just check it resolves without error.
+        assert!(find_project_dir().is_ok());
+    }
+
+    #[test]
+    fn parse_assistant_end_turn() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}"#;
+        let events = parse_jsonl_line(line).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], AgentEvent::TextBlock { .. }));
+        assert!(
+            matches!(&events[1], AgentEvent::TurnCompleted { status } if status == "completed")
+        );
+    }
+
+    #[test]
+    fn parse_assistant_multiple_blocks() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"hello"},{"type":"tool_use","id":"t1","name":"Write","input":{}}]}}"#;
+        let events = parse_jsonl_line(line).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], AgentEvent::ThinkingDelta { .. }));
+        assert!(matches!(&events[1], AgentEvent::TextBlock { .. }));
+        assert!(matches!(&events[2], AgentEvent::ToolUseStart { .. }));
+    }
+
+    #[test]
+    fn parse_assistant_no_content() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant"}}"#;
+        let events = parse_jsonl_line(line).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_user_tool_result_is_error() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"failed","is_error":true}]}}"#;
+        let events = parse_jsonl_line(line).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::ToolResult { is_error, .. } if *is_error));
+    }
+
+    #[test]
+    fn parse_user_tool_result_truncation() {
+        let big_content = "x".repeat(40_000);
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"{big_content}"}}]}}}}"#
+        );
+        let events = parse_jsonl_line(&line).unwrap();
+        assert_eq!(events.len(), 1);
+        if let AgentEvent::ToolResult { content, .. } = &events[0] {
+            assert!(content.len() < 40_000, "content should be truncated");
+            assert!(content.ends_with("... (truncated)"));
+        } else {
+            panic!("expected ToolResult");
+        }
+    }
+
+    #[test]
+    fn parse_invalid_json_returns_err() {
+        let result = parse_jsonl_line("not json at all");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_unknown_type_returns_empty() {
+        let line = r#"{"type":"something-new","data":123}"#;
+        let events = parse_jsonl_line(line).unwrap();
+        assert!(events.is_empty());
     }
 }

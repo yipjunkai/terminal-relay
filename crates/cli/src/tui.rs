@@ -525,3 +525,135 @@ pub fn qr_to_lines(data: &str) -> anyhow::Result<Vec<String>> {
     }
     Ok(lines)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_bytes ─────────────────────────────────────────────────
+
+    #[test]
+    fn format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn format_bytes_below_kb() {
+        assert_eq!(format_bytes(512), "512 B");
+    }
+
+    #[test]
+    fn format_bytes_boundary_1023() {
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_bytes_exact_kb() {
+        assert_eq!(format_bytes(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn format_bytes_kb_range() {
+        assert_eq!(format_bytes(5120), "5.0 KB");
+    }
+
+    #[test]
+    fn format_bytes_boundary_just_under_mb() {
+        let result = format_bytes(1024 * 1024 - 1);
+        assert!(result.contains("KB"));
+    }
+
+    #[test]
+    fn format_bytes_exact_mb() {
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+    }
+
+    #[test]
+    fn format_bytes_mb_range() {
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    // ── PeerStatus ───────────────────────────────────────────────────
+
+    #[test]
+    fn peer_status_labels() {
+        assert_eq!(PeerStatus::WaitingForPeer.label(), "Waiting for peer");
+        assert_eq!(PeerStatus::Handshaking.label(), "Handshaking...");
+        assert_eq!(PeerStatus::Secure.label(), "Secure");
+        assert_eq!(PeerStatus::Disconnected.label(), "Disconnected");
+    }
+
+    #[test]
+    fn peer_status_indicators() {
+        assert_eq!(PeerStatus::Secure.indicator(), "●");
+        assert_eq!(PeerStatus::Disconnected.indicator(), "○");
+        assert_eq!(PeerStatus::WaitingForPeer.indicator(), "◌");
+        assert_eq!(PeerStatus::Handshaking.indicator(), "◌");
+    }
+
+    #[test]
+    fn peer_status_colors_secure_is_green() {
+        assert_eq!(PeerStatus::Secure.color(), Color::Green);
+    }
+
+    #[test]
+    fn peer_status_colors_disconnected_is_red() {
+        assert_eq!(PeerStatus::Disconnected.color(), Color::Red);
+    }
+
+    // ── qr_to_lines ─────────────────────────────────────────────────
+
+    #[test]
+    fn qr_to_lines_produces_output() {
+        let lines = qr_to_lines("test").unwrap();
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn qr_to_lines_deterministic() {
+        let a = qr_to_lines("hello").unwrap();
+        let b = qr_to_lines("hello").unwrap();
+        assert_eq!(a, b);
+    }
+
+    // ── TuiState::push_log ──────────────────────────────────────────
+
+    fn test_tui_state() -> TuiState {
+        TuiState::new(
+            SessionInfo {
+                tool_name: "test".to_string(),
+                session_id: "id".to_string(),
+                relay_url: "ws://localhost".to_string(),
+                fingerprint: "fp".to_string(),
+            },
+            vec![],
+        )
+    }
+
+    #[test]
+    fn push_log_adds_entry() {
+        let mut state = test_tui_state();
+        state.push_log(LogLevel::Info, "hello");
+        assert_eq!(state.log.len(), 1);
+        assert_eq!(state.log[0].message, "hello");
+    }
+
+    #[test]
+    fn push_log_caps_at_max() {
+        let mut state = test_tui_state();
+        for i in 0..=MAX_LOG_ENTRIES {
+            state.push_log(LogLevel::Info, format!("msg-{i}"));
+        }
+        assert_eq!(state.log.len(), MAX_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn push_log_evicts_oldest() {
+        let mut state = test_tui_state();
+        for i in 0..=MAX_LOG_ENTRIES {
+            state.push_log(LogLevel::Info, format!("msg-{i}"));
+        }
+        // msg-0 should have been evicted, msg-1 is now first
+        assert_eq!(state.log.front().unwrap().message, "msg-1");
+    }
+}

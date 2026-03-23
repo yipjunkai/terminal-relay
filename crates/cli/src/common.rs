@@ -304,3 +304,136 @@ pub async fn shutdown_signal() {
         tokio::signal::ctrl_c().await.ok();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::crypto::SessionKeys;
+
+    fn dummy_channel() -> SecureChannel {
+        SecureChannel::new(SessionKeys {
+            tx: [1u8; 32],
+            rx: [2u8; 32],
+        })
+    }
+
+    #[test]
+    fn channel_state_starts_disconnected() {
+        let chan = ChannelState::new();
+        assert!(!chan.is_confirmed());
+        assert!(!chan.has_channel());
+        assert!(chan.expected_peer_mac().is_none());
+    }
+
+    #[test]
+    fn channel_state_handshaking_transition() {
+        let mut chan = ChannelState::new();
+        let mac = [0xABu8; 32];
+        chan.start_handshake(dummy_channel(), mac);
+        assert!(chan.has_channel());
+        assert!(!chan.is_confirmed());
+        assert_eq!(chan.expected_peer_mac(), Some(&mac));
+    }
+
+    #[test]
+    fn channel_state_confirmed_channel_none_when_handshaking() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0u8; 32]);
+        assert!(chan.confirmed_channel().is_none());
+    }
+
+    #[test]
+    fn channel_state_confirm_transition() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0u8; 32]);
+        assert!(chan.confirm());
+        assert!(chan.is_confirmed());
+        assert!(chan.has_channel());
+        assert!(chan.confirmed_channel().is_some());
+        assert!(chan.expected_peer_mac().is_none());
+    }
+
+    #[test]
+    fn channel_state_confirm_from_disconnected_returns_false() {
+        let mut chan = ChannelState::new();
+        assert!(!chan.confirm());
+        assert!(!chan.has_channel());
+    }
+
+    #[test]
+    fn channel_state_confirm_from_confirmed_returns_false() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0u8; 32]);
+        chan.confirm();
+        // Second confirm should return false, stay Confirmed
+        assert!(!chan.confirm());
+        assert!(chan.is_confirmed());
+    }
+
+    #[test]
+    fn channel_state_reset_from_confirmed() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0u8; 32]);
+        chan.confirm();
+        chan.reset();
+        assert!(!chan.is_confirmed());
+        assert!(!chan.has_channel());
+    }
+
+    #[test]
+    fn channel_state_reset_from_handshaking() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0u8; 32]);
+        chan.reset();
+        assert!(!chan.has_channel());
+        assert!(chan.expected_peer_mac().is_none());
+    }
+
+    #[test]
+    fn confirmed_channel_returns_none_when_disconnected() {
+        let mut chan = ChannelState::new();
+        assert!(chan.confirmed_channel().is_none());
+    }
+
+    #[test]
+    fn verify_handshake_confirm_matching_mac() {
+        let mut chan = ChannelState::new();
+        let mac = [0x42u8; 32];
+        chan.start_handshake(dummy_channel(), mac);
+        let confirm = HandshakeConfirm { mac };
+        assert!(verify_handshake_confirm(&confirm, &chan));
+    }
+
+    #[test]
+    fn verify_handshake_confirm_mismatched_mac() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0x42u8; 32]);
+        let confirm = HandshakeConfirm { mac: [0x00u8; 32] };
+        assert!(!verify_handshake_confirm(&confirm, &chan));
+    }
+
+    #[test]
+    fn verify_handshake_confirm_no_pending_handshake() {
+        let chan = ChannelState::new();
+        let confirm = HandshakeConfirm { mac: [0u8; 32] };
+        assert!(!verify_handshake_confirm(&confirm, &chan));
+    }
+
+    #[test]
+    fn verify_handshake_confirm_after_confirmed() {
+        let mut chan = ChannelState::new();
+        chan.start_handshake(dummy_channel(), [0x42u8; 32]);
+        chan.confirm();
+        // After confirm, expected_peer_mac is gone
+        let confirm = HandshakeConfirm { mac: [0x42u8; 32] };
+        assert!(!verify_handshake_confirm(&confirm, &chan));
+    }
+
+    #[test]
+    fn send_peer_frame_closed_channel_returns_err() {
+        let (tx, rx) = mpsc::channel::<RelayMessage>(1);
+        drop(rx); // close the receiver
+        let result = send_peer_frame(&tx, "session-id", PeerFrame::KeepAlive);
+        assert!(result.is_err());
+    }
+}

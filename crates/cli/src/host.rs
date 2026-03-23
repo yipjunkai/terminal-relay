@@ -834,11 +834,8 @@ mod tests {
     }
 
     #[test]
-    fn known_timestamp_2026() {
-        // 2026-03-17T16:30:00Z = 1773860200 + 600 = let's compute:
-        // Using a known reference: 2026-03-23T00:00:00Z
-        // March 23, 2026 = day count from epoch
-        // Let's use a simpler known: 2000-01-01T00:00:00Z = 946684800
+    fn known_timestamp_2000() {
+        // 2000-01-01T00:00:00Z = 946684800
         assert_eq!(unix_secs_to_rfc3339(946684800), "2000-01-01T00:00:00Z");
     }
 
@@ -858,5 +855,90 @@ mod tests {
     fn year_2038() {
         // 2038-01-19T03:14:07Z = 2147483647 (max i32, the Y2K38 problem)
         assert_eq!(unix_secs_to_rfc3339(2147483647), "2038-01-19T03:14:07Z");
+    }
+
+    // ── BoundedByteBuffer ────────────────────────────────────────────
+
+    #[test]
+    fn buffer_new_is_empty() {
+        let mut buf = BoundedByteBuffer::new(1024);
+        assert_eq!(buf.total_bytes, 0);
+        assert!(buf.drain().is_empty());
+    }
+
+    #[test]
+    fn buffer_push_within_capacity() {
+        let mut buf = BoundedByteBuffer::new(1024);
+        buf.push(vec![1, 2, 3]);
+        buf.push(vec![4, 5]);
+        buf.push(vec![6]);
+        assert_eq!(buf.total_bytes, 6);
+        let chunks = buf.drain();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], vec![1, 2, 3]);
+        assert_eq!(chunks[1], vec![4, 5]);
+        assert_eq!(chunks[2], vec![6]);
+    }
+
+    #[test]
+    fn buffer_push_evicts_oldest() {
+        let mut buf = BoundedByteBuffer::new(10);
+        buf.push(vec![0; 6]); // 6 bytes
+        buf.push(vec![1; 6]); // total 12, over cap → evict first
+        assert_eq!(buf.total_bytes, 6);
+        let chunks = buf.drain();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], vec![1; 6]);
+    }
+
+    #[test]
+    fn buffer_exact_capacity_no_eviction() {
+        let mut buf = BoundedByteBuffer::new(10);
+        buf.push(vec![0; 5]);
+        buf.push(vec![1; 5]);
+        assert_eq!(buf.total_bytes, 10);
+        assert_eq!(buf.drain().len(), 2);
+    }
+
+    #[test]
+    fn buffer_drain_resets() {
+        let mut buf = BoundedByteBuffer::new(1024);
+        buf.push(vec![1, 2, 3]);
+        buf.drain();
+        assert_eq!(buf.total_bytes, 0);
+        assert!(buf.drain().is_empty());
+    }
+
+    #[test]
+    fn buffer_push_after_drain() {
+        let mut buf = BoundedByteBuffer::new(1024);
+        buf.push(vec![1]);
+        buf.drain();
+        buf.push(vec![2, 3]);
+        assert_eq!(buf.total_bytes, 2);
+        let chunks = buf.drain();
+        assert_eq!(chunks, vec![vec![2, 3]]);
+    }
+
+    #[test]
+    fn buffer_zero_capacity_evicts_everything() {
+        let mut buf = BoundedByteBuffer::new(0);
+        buf.push(vec![1, 2, 3]);
+        assert_eq!(buf.total_bytes, 0);
+        assert!(buf.drain().is_empty());
+    }
+
+    #[test]
+    fn buffer_multiple_evictions() {
+        let mut buf = BoundedByteBuffer::new(10);
+        buf.push(vec![0; 3]); // 3
+        buf.push(vec![1; 3]); // 6
+        buf.push(vec![2; 3]); // 9
+        buf.push(vec![3; 5]); // 14 → evict [0;3],[1;3] → 8
+        assert_eq!(buf.total_bytes, 8);
+        let chunks = buf.drain();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], vec![2; 3]);
+        assert_eq!(chunks[1], vec![3; 5]);
     }
 }

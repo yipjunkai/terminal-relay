@@ -416,3 +416,96 @@ impl Drop for RawModeGuard {
         let _ = terminal::disable_raw_mode();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with_uri(uri: &str) -> AttachArgs {
+        AttachArgs {
+            pairing_uri: Some(uri.to_string()),
+            relay_url: None,
+            session_id: None,
+            pairing_code: None,
+            expected_fingerprint: None,
+        }
+    }
+
+    fn args_manual(
+        relay: Option<&str>,
+        session: Option<&str>,
+        code: Option<&str>,
+        fingerprint: Option<&str>,
+    ) -> AttachArgs {
+        AttachArgs {
+            pairing_uri: None,
+            relay_url: relay.map(String::from),
+            session_id: session.map(String::from),
+            pairing_code: code.map(String::from),
+            expected_fingerprint: fingerprint.map(String::from),
+        }
+    }
+
+    #[test]
+    fn resolve_pairing_from_uri() {
+        let uri = "farwatch://pair?relay=wss://example.com/ws&session=abc-123&code=AAAAAA-BBBBBB-CCCCCC";
+        let result = resolve_pairing(&args_with_uri(uri)).unwrap();
+        assert_eq!(result.relay_url, "wss://example.com/ws");
+        assert_eq!(result.session_id, "abc-123");
+        assert_eq!(result.pairing_code, "AAAAAA-BBBBBB-CCCCCC");
+    }
+
+    #[test]
+    fn resolve_pairing_from_individual_args() {
+        let args = args_manual(
+            Some("wss://relay.example.com/ws"),
+            Some("sess-1"),
+            Some("XYZXYZ-XYZXYZ-XYZXYZ"),
+            None,
+        );
+        let result = resolve_pairing(&args).unwrap();
+        assert_eq!(result.relay_url, "wss://relay.example.com/ws");
+        assert_eq!(result.session_id, "sess-1");
+        assert_eq!(result.pairing_code, "XYZXYZ-XYZXYZ-XYZXYZ");
+        assert!(result.expected_fingerprint.is_none());
+    }
+
+    #[test]
+    fn resolve_pairing_with_fingerprint() {
+        let args = args_manual(
+            Some("wss://r.example.com/ws"),
+            Some("s1"),
+            Some("AAAAAA-BBBBBB-CCCCCC"),
+            Some("abc123"),
+        );
+        let result = resolve_pairing(&args).unwrap();
+        assert_eq!(result.expected_fingerprint, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn resolve_pairing_missing_relay_url() {
+        let args = args_manual(None, Some("sess"), Some("CODE12-CODE34-CODE56"), None);
+        let err = resolve_pairing(&args).unwrap_err();
+        assert!(err.to_string().contains("--relay-url"));
+    }
+
+    #[test]
+    fn resolve_pairing_missing_session_id() {
+        let args = args_manual(Some("wss://r.com/ws"), None, Some("CODE12-CODE34-CODE56"), None);
+        let err = resolve_pairing(&args).unwrap_err();
+        assert!(err.to_string().contains("--session-id"));
+    }
+
+    #[test]
+    fn resolve_pairing_missing_pairing_code() {
+        let args = args_manual(Some("wss://r.com/ws"), Some("sess"), None, None);
+        let err = resolve_pairing(&args).unwrap_err();
+        assert!(err.to_string().contains("--pairing-code"));
+    }
+
+    #[test]
+    fn resolve_pairing_invalid_uri() {
+        let result = resolve_pairing(&args_with_uri("not-a-valid-uri"));
+        assert!(result.is_err());
+    }
+}

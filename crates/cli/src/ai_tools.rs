@@ -276,3 +276,75 @@ fn save_default(tool_name: &str) -> anyhow::Result<()> {
     config.save()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── tool_supports_structured ─────────────────────────────────────
+
+    #[test]
+    fn structured_claude_only() {
+        assert!(tool_supports_structured("claude"));
+        assert!(!tool_supports_structured("aider"));
+        assert!(!tool_supports_structured("opencode"));
+        assert!(!tool_supports_structured(""));
+        assert!(!tool_supports_structured("unknown-tool"));
+    }
+
+    // ── known_tools ──────────────────────────────────────────────────
+
+    #[test]
+    fn known_tools_contains_expected_entries() {
+        let tools = known_tools();
+        let names: Vec<&str> = tools.iter().map(|(n, _, _)| *n).collect();
+        assert!(names.contains(&"claude"));
+        assert!(names.contains(&"opencode"));
+        assert!(names.contains(&"copilot"));
+        assert!(names.contains(&"gemini"));
+        assert!(names.contains(&"aider"));
+    }
+
+    #[test]
+    fn known_tools_copilot_uses_gh() {
+        let tools = known_tools();
+        let copilot = tools.iter().find(|(n, _, _)| *n == "copilot").unwrap();
+        assert_eq!(copilot.1, "gh");
+        assert_eq!(copilot.2, vec!["copilot", "cli"]);
+    }
+
+    // ── resolve_by_name ──────────────────────────────────────────────
+
+    #[test]
+    fn resolve_by_name_known_unavailable() {
+        let tools = vec![ToolCandidate {
+            name: "claude".to_string(),
+            command: "claude".to_string(),
+            args: vec![],
+            available: false,
+        }];
+        let err = resolve_by_name("claude", &tools).unwrap_err();
+        assert!(err.to_string().contains("not available on PATH"));
+    }
+
+    #[test]
+    fn resolve_by_name_known_available() {
+        let tools = vec![ToolCandidate {
+            name: "claude".to_string(),
+            command: "claude".to_string(),
+            args: vec![],
+            available: true,
+        }];
+        let result = resolve_by_name("claude", &tools).unwrap();
+        assert_eq!(result.name, "claude");
+        assert_eq!(result.command, "claude");
+        assert!(result.supports_structured);
+    }
+
+    #[test]
+    fn resolve_by_name_empty_string_errors() {
+        let tools = vec![];
+        let err = resolve_by_name("", &tools).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+}
