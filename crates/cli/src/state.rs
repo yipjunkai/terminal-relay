@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fmt, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -7,10 +7,72 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm,
 };
-use anyhow::Context;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
+
+/// Typed errors for session state operations.
+#[derive(Debug)]
+pub enum StateError {
+    /// Filesystem I/O failure (read, write, mkdir, permissions).
+    Io { context: String, source: io::Error },
+    /// State encryption key is invalid (wrong length or corrupt).
+    InvalidKey,
+    /// State key file has wrong length.
+    InvalidKeyLength { actual: usize },
+    /// AES-GCM encryption failed.
+    EncryptionFailed,
+    /// AES-GCM decryption failed (wrong key or corrupted file).
+    DecryptionFailed,
+    /// Encrypted file is too short to contain nonce + ciphertext.
+    FileTooShort,
+    /// JSON serialization failed.
+    Serialize(serde_json::Error),
+    /// JSON deserialization failed.
+    Deserialize(serde_json::Error),
+}
+
+impl fmt::Display for StateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { context, source } => write!(f, "{context}: {source}"),
+            Self::InvalidKey => write!(f, "invalid state encryption key"),
+            Self::InvalidKeyLength { actual } => {
+                write!(
+                    f,
+                    "state key file has invalid length {actual} (expected 32)"
+                )
+            }
+            Self::EncryptionFailed => write!(f, "state encryption failed"),
+            Self::DecryptionFailed => {
+                write!(f, "state decryption failed (wrong key or corrupted file)")
+            }
+            Self::FileTooShort => write!(f, "encrypted state file too short"),
+            Self::Serialize(e) => write!(f, "failed serializing session record: {e}"),
+            Self::Deserialize(e) => write!(f, "failed parsing session state: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Serialize(e) | Self::Deserialize(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Helper to wrap io::Error with context.
+fn io_err(context: impl Into<String>, source: io::Error) -> StateError {
+    StateError::Io {
+        context: context.into(),
+        source,
+    }
+}
+
+type StateResult<T> = Result<T, StateError>;
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -69,7 +131,7 @@ pub struct SessionStore {
 const ENCRYPTED_MAGIC: &[u8; 4] = b"FWSE"; // Farwatch Session Encrypted
 
 impl SessionStore {
-    pub fn new(root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(root: PathBuf) -> StateResult<Self> {
         ensure_dir(&root)?;
         set_dir_permissions(&root)?;
 
@@ -81,33 +143,42 @@ impl SessionStore {
         Ok(Self { root, state_key })
     }
 
-    pub fn save(&self, record: &SessionRecord) -> anyhow::Result<()> {
-        let plaintext =
-            serde_json::to_vec_pretty(record).context("failed serializing session record")?;
+    pub fn save(&self, record: &SessionRecord) -> StateResult<()> {
+        let plaintext = serde_json::to_vec_pretty(record).map_err(StateError::Serialize)?;
         let ciphertext = seal_state(&self.state_key, &plaintext)?;
 
         let path = self.record_path(&record.session_id);
-        fs::write(&path, &ciphertext)
-            .with_context(|| format!("failed writing session state {}", path.display()))?;
+        fs::write(&path, &ciphertext).map_err(|e| {
+            io_err(
+                format!("failed writing session state {}", path.display()),
+                e,
+            )
+        })?;
         set_file_permissions(&path)?;
         Ok(())
     }
 
     #[allow(dead_code)] // Used in tests; will be used by session resume
-    pub fn load(&self, session_id: &str) -> anyhow::Result<SessionRecord> {
+    pub fn load(&self, session_id: &str) -> StateResult<SessionRecord> {
         let path = self.record_path(session_id);
-        let bytes = fs::read(&path)
-            .with_context(|| format!("failed reading session state {}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|e| {
+            io_err(
+                format!("failed reading session state {}", path.display()),
+                e,
+            )
+        })?;
         let plaintext = open_state_or_legacy(&self.state_key, &bytes)?;
-        serde_json::from_slice(&plaintext).context("failed parsing session state")
+        serde_json::from_slice(&plaintext).map_err(StateError::Deserialize)
     }
 
     #[allow(dead_code)] // Used in tests; will be used by session management
-    pub fn list(&self) -> anyhow::Result<Vec<SessionRecord>> {
+    pub fn list(&self) -> StateResult<Vec<SessionRecord>> {
         let dir = self.sessions_dir();
         let mut records = Vec::new();
-        for entry in fs::read_dir(&dir).context("failed reading sessions directory")? {
-            let entry = entry?;
+        for entry in
+            fs::read_dir(&dir).map_err(|e| io_err("failed reading sessions directory", e))?
+        {
+            let entry = entry.map_err(|e| io_err("failed reading directory entry", e))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -141,13 +212,13 @@ impl Drop for SessionStore {
 // ── State encryption ──
 
 /// Encrypt plaintext for at-rest storage: `MAGIC || nonce (12) || ciphertext`.
-fn seal_state(key: &[u8; 32], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("bad state key"))?;
+fn seal_state(key: &[u8; 32], plaintext: &[u8]) -> StateResult<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| StateError::InvalidKey)?;
     let mut nonce = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce);
     let ciphertext = cipher
         .encrypt(&nonce.into(), plaintext)
-        .map_err(|_| anyhow::anyhow!("state encryption failed"))?;
+        .map_err(|_| StateError::EncryptionFailed)?;
 
     let mut out = Vec::with_capacity(4 + 12 + ciphertext.len());
     out.extend_from_slice(ENCRYPTED_MAGIC);
@@ -157,18 +228,17 @@ fn seal_state(key: &[u8; 32], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Decrypt an at-rest file, or fall back to treating it as legacy plaintext JSON.
-fn open_state_or_legacy(key: &[u8; 32], bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn open_state_or_legacy(key: &[u8; 32], bytes: &[u8]) -> StateResult<Vec<u8>> {
     if bytes.len() >= 4 && &bytes[..4] == ENCRYPTED_MAGIC {
         if bytes.len() < 4 + 12 {
-            anyhow::bail!("encrypted state file too short");
+            return Err(StateError::FileTooShort);
         }
         let nonce: [u8; 12] = bytes[4..16].try_into().unwrap();
         let ciphertext = &bytes[16..];
-        let cipher =
-            Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("bad state key"))?;
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| StateError::InvalidKey)?;
         let plaintext = cipher
             .decrypt(&nonce.into(), ciphertext)
-            .map_err(|_| anyhow::anyhow!("state decryption failed (wrong key or corrupted)"))?;
+            .map_err(|_| StateError::DecryptionFailed)?;
         Ok(plaintext)
     } else {
         // Legacy unencrypted JSON — return as-is.
@@ -179,15 +249,14 @@ fn open_state_or_legacy(key: &[u8; 32], bytes: &[u8]) -> anyhow::Result<Vec<u8>>
 // ── State key management ──
 
 /// Load the state encryption key from `<root>/state.key`, or generate and persist one.
-fn load_or_create_state_key(root: &Path) -> anyhow::Result<[u8; 32]> {
+fn load_or_create_state_key(root: &Path) -> StateResult<[u8; 32]> {
     let key_path = root.join("state.key");
     if key_path.exists() {
-        let bytes = fs::read(&key_path).context("failed reading state key")?;
+        let bytes = fs::read(&key_path).map_err(|e| io_err("failed reading state key", e))?;
         if bytes.len() != 32 {
-            anyhow::bail!(
-                "state key file has invalid length {} (expected 32)",
-                bytes.len()
-            );
+            return Err(StateError::InvalidKeyLength {
+                actual: bytes.len(),
+            });
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
@@ -195,7 +264,7 @@ fn load_or_create_state_key(root: &Path) -> anyhow::Result<[u8; 32]> {
     } else {
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
-        fs::write(&key_path, key).context("failed writing state key")?;
+        fs::write(&key_path, key).map_err(|e| io_err("failed writing state key", e))?;
         set_file_permissions(&key_path)?;
         Ok(key)
     }
@@ -204,33 +273,41 @@ fn load_or_create_state_key(root: &Path) -> anyhow::Result<[u8; 32]> {
 // ── File permissions (Unix) ──
 
 #[cfg(unix)]
-fn set_dir_permissions(path: &Path) -> anyhow::Result<()> {
+fn set_dir_permissions(path: &Path) -> StateResult<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("failed setting permissions on {}", path.display()))
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| {
+        io_err(
+            format!("failed setting permissions on {}", path.display()),
+            e,
+        )
+    })
 }
 
 #[cfg(unix)]
-fn set_file_permissions(path: &Path) -> anyhow::Result<()> {
+fn set_file_permissions(path: &Path) -> StateResult<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("failed setting permissions on {}", path.display()))
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+        io_err(
+            format!("failed setting permissions on {}", path.display()),
+            e,
+        )
+    })
 }
 
 #[cfg(not(unix))]
-fn set_dir_permissions(_path: &Path) -> anyhow::Result<()> {
+fn set_dir_permissions(_path: &Path) -> StateResult<()> {
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) -> anyhow::Result<()> {
+fn set_file_permissions(_path: &Path) -> StateResult<()> {
     Ok(())
 }
 
-fn ensure_dir(path: &Path) -> anyhow::Result<()> {
+fn ensure_dir(path: &Path) -> StateResult<()> {
     if !path.exists() {
         fs::create_dir_all(path)
-            .with_context(|| format!("failed creating directory {}", path.display()))?;
+            .map_err(|e| io_err(format!("failed creating directory {}", path.display()), e))?;
     }
     Ok(())
 }
