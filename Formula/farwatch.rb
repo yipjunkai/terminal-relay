@@ -18,24 +18,24 @@ class Farwatch < Formula
   on_macos do
     on_intel do
       url "https://github.com/yipjunkai/farwatch/releases/download/v0.1.0/farwatch-v0.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "262e9138c7fde99bfddd22ea2aeb6fd4ce81d7095ad7a1cfe590dde8ffc0b2c0"
+      sha256 "b98b184207ec42f80848ee2177d67032a1b12d6c622a3e3c5e6309edf701e142"
     end
 
     on_arm do
       url "https://github.com/yipjunkai/farwatch/releases/download/v0.1.0/farwatch-v0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "9f448dcaca57911cb2daba012421361a5e0a7959a686ccfd6bb2a51a71a9d1a2"
+      sha256 "f168c388accf8b91fcaebec81bfac9d6d4315a1a137e1acab96f3ddee7001419"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/yipjunkai/farwatch/releases/download/v0.1.0/farwatch-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "c682744bc67f3f0d48752a871f92c554ba7e36e323b45d232648056183a02c3a"
+      sha256 "a29a78c213b33cc603d6b27d2f800814a50b585e597f20a18f58d6d5b1776e7c"
     end
 
     on_arm do
       url "https://github.com/yipjunkai/farwatch/releases/download/v0.1.0/farwatch-v0.1.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "162d462eb14f538c849fe9659e4ec3bc988cd4bbace989b8bcc6104ab4b7cb03"
+      sha256 "1470150cde96796b5ca8fd072bf990621bf39e8eaba73fec6caa74feea50b2de"
     end
   end
 
