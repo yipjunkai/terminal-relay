@@ -7,7 +7,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::sync::RwLock;
+use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -28,9 +30,9 @@ pub struct ApiKeyPayload {
 /// Handles API key verification and revocation list management.
 pub struct AuthState {
     /// Current HMAC secret for verifying signed API keys.
-    hmac_secret: Vec<u8>,
+    hmac_secret: Zeroizing<Vec<u8>>,
     /// Previous HMAC secret (for rotation). Optional.
-    hmac_secret_previous: Option<Vec<u8>>,
+    hmac_secret_previous: Option<Zeroizing<Vec<u8>>>,
     /// Set of revoked key IDs, synced periodically from the control API.
     revoked_keys: RwLock<HashSet<String>>,
     /// Control API base URL for fetching revocation lists and reporting.
@@ -49,8 +51,8 @@ impl AuthState {
         internal_secret: Option<String>,
     ) -> Self {
         Self {
-            hmac_secret: hmac_secret.into_bytes(),
-            hmac_secret_previous: hmac_secret_previous.map(|s| s.into_bytes()),
+            hmac_secret: Zeroizing::new(hmac_secret.into_bytes()),
+            hmac_secret_previous: hmac_secret_previous.map(|s| Zeroizing::new(s.into_bytes())),
             revoked_keys: RwLock::new(HashSet::new()),
             control_api_url,
             internal_secret,
@@ -106,7 +108,7 @@ impl AuthState {
         mac.update(payload_json.as_bytes());
 
         let expected_sig = hex::encode(mac.finalize().into_bytes());
-        constant_time_eq(expected_sig.as_bytes(), provided_sig.as_bytes())
+        expected_sig.as_bytes().ct_eq(provided_sig.as_bytes()).into()
     }
 
     /// Periodically sync the revocation list from the control API.
@@ -238,16 +240,7 @@ struct RevokedKeysResponse {
     revoked_key_ids: Vec<String>,
 }
 
-/// Constant-time byte comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -455,23 +448,4 @@ mod tests {
         assert!(!state.is_enabled());
     }
 
-    #[test]
-    fn constant_time_eq_same() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-    }
-
-    #[test]
-    fn constant_time_eq_different() {
-        assert!(!constant_time_eq(b"hello", b"world"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_lengths() {
-        assert!(!constant_time_eq(b"short", b"longer string"));
-    }
-
-    #[test]
-    fn constant_time_eq_empty() {
-        assert!(constant_time_eq(b"", b""));
-    }
 }

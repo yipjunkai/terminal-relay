@@ -4,13 +4,25 @@ use uuid::Uuid;
 
 use crate::{error::CoreError, error::CoreResult};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PairingUri {
     pub relay_url: String,
     pub session_id: String,
     pub pairing_code: String,
     pub expected_fingerprint: Option<String>,
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for PairingUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingUri")
+            .field("relay_url", &self.relay_url)
+            .field("session_id", &self.session_id)
+            .field("pairing_code", &self.pairing_code)
+            .field("expected_fingerprint", &self.expected_fingerprint)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 pub fn new_session_id() -> String {

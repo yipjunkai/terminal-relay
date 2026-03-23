@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         args.max_sessions_per_ip,
         tier_limits,
         Arc::clone(&auth),
-    ));
+    )?);
 
     let cleanup_state = Arc::clone(&state);
     let cleanup_handle = tokio::spawn(async move {

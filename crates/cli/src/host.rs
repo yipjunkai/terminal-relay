@@ -625,7 +625,7 @@ async fn run_takeover(
     // sending Ctrl+L (universal "redraw screen" in TUI apps).
     if let Ok((cols, rows)) = crossterm::terminal::size() {
         let _ = pty.resize(cols.saturating_sub(1).max(1), rows);
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         let _ = pty.resize(cols, rows);
     }
     let _ = pty.send_input(vec![0x0c]); // Ctrl+L

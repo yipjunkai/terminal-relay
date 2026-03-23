@@ -122,9 +122,10 @@ impl RelayState {
         max_sessions_per_ip: usize,
         tier_limits: TierLimits,
         auth: Arc<AuthState>,
-    ) -> Self {
-        let parsed_version = Version::parse(&min_version).unwrap_or_else(|_| Version::new(0, 1, 0));
-        Self {
+    ) -> anyhow::Result<Self> {
+        let parsed_version = Version::parse(&min_version)
+            .map_err(|e| anyhow::anyhow!("invalid --min-version \"{min_version}\": {e}"))?;
+        Ok(Self {
             sessions: DashMap::new(),
             ip_sessions: DashMap::new(),
             user_sessions: DashMap::new(),
@@ -134,7 +135,7 @@ impl RelayState {
             max_sessions_per_ip,
             tier_limits,
             auth,
-        }
+        })
     }
 
     pub fn session_count(&self) -> usize {
