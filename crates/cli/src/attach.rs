@@ -5,22 +5,21 @@ use clap::Args;
 use crossterm::terminal;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 use protocol::{
-    crypto::{
-        HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys,
-        fingerprint, generate_key_pair,
-    },
+    crypto::{fingerprint, generate_key_pair},
     pairing::{PairingUri, parse_pairing_uri},
     protocol::{
-        HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
+        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
         RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
     },
 };
 
-use crate::common::{ChannelState, now_millis, send_handshake, send_peer_frame, shutdown_signal};
+use crate::common::{
+    ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff,
+    send_handshake, send_peer_frame, shutdown_signal, verify_handshake_confirm,
+};
 use crate::relay_client::RelayConnection;
 
 #[derive(Debug, Clone, Args)]
@@ -240,75 +239,29 @@ async fn handle_route(
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
         PeerFrame::Handshake(handshake) => {
-            // Ignore duplicate handshakes if we already have a channel
-            // (in-progress or confirmed). This handles the dual-handshake
-            // race where both sides send Handshake simultaneously — the
-            // first one processed wins, and the second is safely dropped.
-            if chan.channel.is_some() {
-                info!(
-                    confirmed = chan.confirmed,
-                    "ignoring duplicate handshake, channel already established"
-                );
-                return Ok(RouteAction::Continue);
-            }
-
-            // Validate handshake timestamp to reject stale/replayed messages.
-            let now = now_millis();
-            let age = now.saturating_sub(handshake.timestamp_ms);
-            if age > HANDSHAKE_MAX_AGE_MS {
-                warn!(age_ms = age, "rejecting stale handshake");
-                return Ok(RouteAction::Continue);
-            }
-
-            if let Some(expected) = &pairing.expected_fingerprint
-                && &handshake.fingerprint != expected
-            {
-                return Err(anyhow::anyhow!(
-                    "fingerprint mismatch: expected {}, received {}",
-                    expected,
-                    handshake.fingerprint
-                ));
-            }
-
-            let keys = derive_session_keys(
+            let result = process_inbound_handshake(
                 PeerRole::Client,
                 &pairing.session_id,
                 local_secret,
-                handshake.public_key,
-            )?;
-
-            // Compute our outbound confirmation MAC and the expected peer MAC.
-            let our_mac = compute_handshake_mac(
-                &keys.tx,
                 local_public,
-                &handshake.public_key,
-                &pairing.session_id,
-            );
-            let peer_mac = compute_handshake_mac(
-                &keys.rx,
-                &handshake.public_key,
-                local_public,
-                &pairing.session_id,
-            );
-
-            chan.channel = Some(SecureChannel::new(keys));
-            chan.confirmed = false;
-            chan.expected_peer_mac = Some(peer_mac);
-
-            send_peer_frame(
+                &handshake,
+                chan,
+                pairing.expected_fingerprint.as_deref(),
                 relay_tx,
-                &pairing.session_id,
-                PeerFrame::HandshakeConfirm(HandshakeConfirm { mac: our_mac }),
             )?;
+
+            let Some(hs) = result else {
+                return Ok(RouteAction::Continue); // Duplicate or stale — ignored
+            };
+
+            chan.channel = Some(hs.channel);
+            chan.confirmed = false;
+            chan.expected_peer_mac = Some(hs.expected_peer_mac);
+
             info!(peer_fingerprint = %handshake.fingerprint, "handshake received, awaiting confirmation");
         }
         PeerFrame::HandshakeConfirm(confirm) => {
-            let Some(expected) = &chan.expected_peer_mac else {
-                warn!("received HandshakeConfirm without pending handshake");
-                return Ok(RouteAction::Continue);
-            };
-
-            if confirm.mac != *expected {
+            if !verify_handshake_confirm(&confirm, chan) {
                 warn!("handshake confirmation MAC mismatch — tearing down channel");
                 chan.reset();
                 return Ok(RouteAction::Continue);
@@ -444,41 +397,14 @@ async fn connect_client(
     .await
 }
 
-/// Maximum number of reconnect attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
 async fn reconnect_client(
     pairing: &PairingUri,
     resume_token: &str,
 ) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
-    let mut delay = Duration::from_secs(1);
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-        tokio::select! {
-            result = connect_client(pairing, Some(resume_token.to_string())) => {
-                match result {
-                    Ok(connection) => return Ok(connection),
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            attempt = attempt,
-                            max = MAX_RECONNECT_ATTEMPTS,
-                            "client reconnect attempt failed"
-                        );
-                    }
-                }
-            }
-            _ = shutdown_signal() => {
-                return Err(anyhow::anyhow!("reconnect interrupted by shutdown signal"));
-            }
-        }
-        if attempt < MAX_RECONNECT_ATTEMPTS {
-            sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(30));
-        }
-    }
-    Err(anyhow::anyhow!(
-        "failed to reconnect after {MAX_RECONNECT_ATTEMPTS} attempts"
-    ))
+    reconnect_with_backoff("client", || {
+        connect_client(pairing, Some(resume_token.to_string()))
+    })
+    .await
 }
 
 struct RawModeGuard;

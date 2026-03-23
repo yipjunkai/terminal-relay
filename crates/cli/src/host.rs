@@ -12,18 +12,18 @@ use tracing::{info, warn};
 use crate::tui::{self, LogLevel, PeerStatus, SessionInfo, Tui, TuiAction, TuiState};
 
 use protocol::{
-    crypto::{
-        HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys,
-        fingerprint, generate_key_pair,
-    },
+    crypto::{fingerprint, generate_key_pair},
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
     protocol::{
-        HandshakeConfirm, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
+        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
         RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
     },
 };
 
-use crate::common::{ChannelState, now_millis, send_handshake, send_peer_frame, shutdown_signal};
+use crate::common::{
+    ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff,
+    send_handshake, send_peer_frame, shutdown_signal, verify_handshake_confirm,
+};
 
 /// Identity and key material for the local side of a session (immutable after creation).
 struct SessionIdentity {
@@ -31,6 +31,17 @@ struct SessionIdentity {
     tool_name: String,
     local_secret: [u8; 32],
     local_public: [u8; 32],
+}
+
+/// Shared mutable state for a host session, threaded through the event loop,
+/// handle_route, and takeover mode to avoid passing many individual parameters.
+struct HostContext {
+    chan: ChannelState,
+    output_backlog: VecDeque<Vec<u8>>,
+    scrollback: ScrollbackBuffer,
+    relay_tx: mpsc::Sender<RelayMessage>,
+    identity: SessionIdentity,
+    tui_state: TuiState,
 }
 
 use crate::{
@@ -142,7 +153,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         api_key.as_deref(),
     )
     .await?;
-    let mut relay_tx = relay.sender();
+    let relay_tx = relay.sender();
     let mut resume_token = registered.resume_token.clone();
 
     // Build pairing URI without the API key — clients can now join authenticated
@@ -217,18 +228,23 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         }
     }
 
-    let mut chan = ChannelState::new();
-    let mut output_backlog: VecDeque<Vec<u8>> = VecDeque::new();
-    let mut scrollback = ScrollbackBuffer::new();
+    let mut ctx = HostContext {
+        chan: ChannelState::new(),
+        output_backlog: VecDeque::new(),
+        scrollback: ScrollbackBuffer::new(),
+        relay_tx,
+        identity,
+        tui_state,
+    };
     let mut peer_online = registered.peer_online;
 
     if peer_online {
         send_handshake(
-            &identity.session_id,
-            &relay_tx,
-            &identity.local_public,
+            &ctx.identity.session_id,
+            &ctx.relay_tx,
+            &ctx.identity.local_public,
             &local_fingerprint,
-            Some(identity.tool_name.clone()),
+            Some(ctx.identity.tool_name.clone()),
         )?;
     }
 
@@ -245,28 +261,28 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                 output = output_rx.recv() => {
                     let Some(bytes) = output else { continue; };
                     let len = bytes.len() as u64;
-                    scrollback.push(bytes.clone());
-                    if chan.confirmed {
-                        if let Some(channel) = chan.channel.as_mut() {
+                    ctx.scrollback.push(bytes.clone());
+                    if ctx.chan.confirmed {
+                        if let Some(channel) = ctx.chan.channel.as_mut() {
                             let sealed = channel.seal(&SecureMessage::PtyOutput(bytes))?;
                             let frame = PeerFrame::Secure(sealed);
-                            if let Err(err) = send_peer_frame(&relay_tx, &identity.session_id, frame) {
+                            if let Err(err) = send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, frame) {
                                 warn!(error = %err, "failed sending PTY output");
                             }
-                            tui_state.bytes_sent += len;
+                            ctx.tui_state.bytes_sent += len;
                         }
                     } else {
-                        queue_backlog(&mut output_backlog, bytes);
+                        queue_backlog(&mut ctx.output_backlog, bytes);
                     }
                 }
                 // ── JSONL watcher: agent events (for structured-capable tools) ──
                 agent_event = async { event_rx.as_mut().unwrap().recv().await }, if event_rx.is_some() => {
                     let Some(evt) = agent_event else { continue; };
-                    if chan.confirmed {
-                        if let Some(channel) = chan.channel.as_mut() {
+                    if ctx.chan.confirmed {
+                        if let Some(channel) = ctx.chan.channel.as_mut() {
                             let sealed = channel.seal(&SecureMessage::AgentEvent(evt))?;
                             let frame = PeerFrame::Secure(sealed);
-                            if let Err(err) = send_peer_frame(&relay_tx, &identity.session_id, frame) {
+                            if let Err(err) = send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, frame) {
                                 warn!(error = %err, "failed sending agent event");
                             }
                         }
@@ -275,125 +291,116 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                 // ── JSONL watcher: log messages → TUI ──
                 log_msg = async { watcher_log_rx.as_mut().unwrap().recv().await }, if watcher_log_rx.is_some() => {
                     if let Some(msg) = log_msg {
-                        tui_state.push_log(LogLevel::Info, msg);
+                        ctx.tui_state.push_log(LogLevel::Info, msg);
                     }
                 }
                 // ── Relay inbound messages ──
                 inbound = relay.recv() => {
                     match inbound {
                         Some(RelayMessage::Route(route)) => {
-                            if route.session_id != identity.session_id {
+                            if route.session_id != ctx.identity.session_id {
                                 continue;
                             }
                             let payload_len = route.payload.len() as u64;
-                            handle_route(
-                                route,
-                                &identity,
-                                &pty,
-                                &mut chan,
-                                &mut output_backlog,
-                                &mut scrollback,
-                                &relay_tx,
-                                &mut tui_state,
-                            )?;
-                            tui_state.bytes_received += payload_len;
+                            handle_route(route, &pty, &mut ctx)?;
+                            ctx.tui_state.bytes_received += payload_len;
                         }
                         Some(RelayMessage::PeerStatus(status)) => {
                             if status.role == PeerRole::Client {
                                 peer_online = status.online;
                                 if peer_online {
-                                    tui_state.status = PeerStatus::PeerConnected;
-                                    tui_state.push_log(LogLevel::Info, "Client connected");
+                                    ctx.tui_state.status = PeerStatus::PeerConnected;
+                                    ctx.tui_state.push_log(LogLevel::Info, "Client connected");
                                     send_handshake(
-                                        &identity.session_id,
-                                        &relay_tx,
-                                        &identity.local_public,
+                                        &ctx.identity.session_id,
+                                        &ctx.relay_tx,
+                                        &ctx.identity.local_public,
                                         &local_fingerprint,
-                                        Some(identity.tool_name.clone()),
+                                        Some(ctx.identity.tool_name.clone()),
                                     )?;
-                                    tui_state.status = PeerStatus::Handshaking;
+                                    ctx.tui_state.status = PeerStatus::Handshaking;
                                 } else {
-                                    tui_state.status = PeerStatus::Disconnected;
-                                    tui_state.push_log(LogLevel::Warning, "Client disconnected");
-                                    info!(session_id = %identity.session_id, "client disconnected, awaiting reconnect");
-                                    chan.reset();
-                                    tui_state.status = PeerStatus::WaitingForPeer;
+                                    ctx.tui_state.status = PeerStatus::Disconnected;
+                                    ctx.tui_state.push_log(LogLevel::Warning, "Client disconnected");
+                                    info!(session_id = %ctx.identity.session_id, "client disconnected, awaiting reconnect");
+                                    ctx.chan.reset();
+                                    ctx.tui_state.status = PeerStatus::WaitingForPeer;
                                 }
                             }
                         }
                         Some(RelayMessage::Error(err)) => {
-                            tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
-                            warn!(session_id = %identity.session_id, message = %err.message, "relay reported error");
+                            ctx.tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
+                            warn!(session_id = %ctx.identity.session_id, message = %err.message, "relay reported error");
                         }
                         Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
                         None => {
-                            tui_state.status = PeerStatus::Disconnected;
-                            tui_state.push_log(LogLevel::Warning, "Relay disconnected, reconnecting...");
-                            warn!(session_id = %identity.session_id, "relay disconnected, attempting recovery");
-                            let (new_relay, new_registered) = reconnect_host(&relay_url, &identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
+                            ctx.tui_state.status = PeerStatus::Disconnected;
+                            ctx.tui_state.push_log(LogLevel::Warning, "Relay disconnected, reconnecting...");
+                            warn!(session_id = %ctx.identity.session_id, "relay disconnected, attempting recovery");
+                            let (new_relay, new_registered) = reconnect_host(&relay_url, &ctx.identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
                             relay = new_relay;
-                            relay_tx = relay.sender();
+                            ctx.relay_tx = relay.sender();
                             resume_token = new_registered.resume_token.clone();
-                            chan.reset();
+                            ctx.chan.reset();
                             peer_online = new_registered.peer_online;
-                            tui_state.status = PeerStatus::WaitingForPeer;
-                            tui_state.push_log(LogLevel::Info, "Reconnected to relay");
+                            ctx.tui_state.status = PeerStatus::WaitingForPeer;
+                            ctx.tui_state.push_log(LogLevel::Info, "Reconnected to relay");
                             if peer_online {
                                 send_handshake(
-                                    &identity.session_id,
-                                    &relay_tx,
-                                    &identity.local_public,
+                                    &ctx.identity.session_id,
+                                    &ctx.relay_tx,
+                                    &ctx.identity.local_public,
                                     &local_fingerprint,
-                                    Some(identity.tool_name.clone()),
+                                    Some(ctx.identity.tool_name.clone()),
                                 )?;
                             }
                         }
                     }
                 }
                 _ = heartbeat.tick() => {
-                    let _ = relay_tx.try_send(RelayMessage::Ping(now_millis()));
+                    let _ = ctx.relay_tx.try_send(RelayMessage::Ping(now_millis()));
                 }
                 _ = redraw.tick() => {
                     match tui_handle.poll_action(Duration::ZERO)? {
                         TuiAction::Quit => {
-                            tui_state.push_log(LogLevel::Info, "Shutting down...");
-                            tui_handle.draw(&tui_state)?;
+                            ctx.tui_state.push_log(LogLevel::Info, "Shutting down...");
+                            tui_handle.draw(&ctx.tui_state)?;
                             break;
                         }
                         TuiAction::Takeover => {
-                            tui_state.push_log(LogLevel::Info, "Takeover mode — double-tap Esc to return");
-                            tui_handle.draw(&tui_state)?;
+                            ctx.tui_state.push_log(LogLevel::Info, "Takeover mode — double-tap Esc to return");
+                            tui_handle.draw(&ctx.tui_state)?;
 
                             // Suspend TUI and enter takeover loop.
                             tui_handle.suspend()?;
-                            run_takeover(&pty, &mut output_rx, &mut event_rx, &mut watcher_log_rx, &mut relay, &relay_tx, &mut chan, &mut output_backlog, &mut scrollback, &identity, &mut tui_state).await?;
+                            run_takeover(&pty, &mut output_rx, &mut event_rx, &mut watcher_log_rx, &mut relay, &mut ctx).await?;
                             tui_handle.resume()?;
-                            tui_state.push_log(LogLevel::Info, "Returned to dashboard");
+                            ctx.tui_state.push_log(LogLevel::Info, "Returned to dashboard");
                         }
                         TuiAction::None => {}
                     }
-                    tui_handle.draw(&tui_state)?;
+                    tui_handle.draw(&ctx.tui_state)?;
                 }
                 exit_code = &mut exit_rx => {
                     let code = exit_code.unwrap_or(1);
-                    tui_state.push_log(LogLevel::Info, format!("Process exited (code {code})"));
-                    info!(session_id = %identity.session_id, code = code, "PTY process exited");
-                    if chan.confirmed
-                        && let Some(channel) = chan.channel.as_mut()
+                    ctx.tui_state.push_log(LogLevel::Info, format!("Process exited (code {code})"));
+                    info!(session_id = %ctx.identity.session_id, code = code, "PTY process exited");
+                    if ctx.chan.confirmed
+                        && let Some(channel) = ctx.chan.channel.as_mut()
                     {
                         let msg = SecureMessage::SessionEnded { exit_code: code };
                         if let Ok(sealed) = channel.seal(&msg) {
-                            let _ = send_peer_frame(&relay_tx, &identity.session_id, PeerFrame::Secure(sealed));
+                            let _ = send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, PeerFrame::Secure(sealed));
                         }
                     }
-                    tui_handle.draw(&tui_state)?;
+                    tui_handle.draw(&ctx.tui_state)?;
                     sleep(Duration::from_secs(1)).await;
                     break;
                 }
                 _ = &mut shutdown => {
-                    tui_state.push_log(LogLevel::Info, "Received shutdown signal");
-                    info!(session_id = %identity.session_id, "received shutdown signal, stopping host session");
-                    tui_handle.draw(&tui_state)?;
+                    ctx.tui_state.push_log(LogLevel::Info, "Received shutdown signal");
+                    info!(session_id = %ctx.identity.session_id, "received shutdown signal, stopping host session");
+                    tui_handle.draw(&ctx.tui_state)?;
                     break;
                 }
             }
@@ -409,145 +416,98 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
 
 fn handle_route(
     route: RelayRoute,
-    id: &SessionIdentity,
     pty: &PtySession,
-    chan: &mut ChannelState,
-    output_backlog: &mut VecDeque<Vec<u8>>,
-    scrollback: &mut ScrollbackBuffer,
-    relay_tx: &mpsc::Sender<RelayMessage>,
-    tui_state: &mut TuiState,
+    ctx: &mut HostContext,
 ) -> anyhow::Result<()> {
     let frame = decode_peer_frame(&route.payload)?;
     match frame {
         PeerFrame::Handshake(handshake) => {
-            // Ignore duplicate handshakes if we already have a channel
-            // (in-progress or confirmed). This handles the dual-handshake
-            // race where both sides send Handshake simultaneously — the
-            // first one processed wins, and the second is safely dropped.
-            if chan.channel.is_some() {
-                info!(
-                    session_id = %id.session_id,
-                    confirmed = chan.confirmed,
-                    "ignoring duplicate handshake, channel already established"
-                );
-                return Ok(());
-            }
+            let result = process_inbound_handshake(
+                PeerRole::Host,
+                &ctx.identity.session_id,
+                ctx.identity.local_secret,
+                &ctx.identity.local_public,
+                &handshake,
+                &ctx.chan,
+                None, // Host does not verify fingerprint
+                &ctx.relay_tx,
+            )?;
 
-            // Validate handshake timestamp to reject stale/replayed messages.
-            let now = now_millis();
-            let age = now.saturating_sub(handshake.timestamp_ms);
-            if age > HANDSHAKE_MAX_AGE_MS {
-                warn!(
-                    session_id = %id.session_id,
-                    age_ms = age,
-                    "rejecting stale handshake"
-                );
-                return Ok(());
-            }
+            let Some(hs) = result else {
+                return Ok(()); // Duplicate or stale — ignored
+            };
 
-            tui_state.push_log(LogLevel::Info, format!("Peer fingerprint: {}", handshake.fingerprint));
+            ctx.tui_state.push_log(LogLevel::Info, format!("Peer fingerprint: {}", handshake.fingerprint));
             info!(
-                session_id = %id.session_id,
+                session_id = %ctx.identity.session_id,
                 peer_fingerprint = %handshake.fingerprint,
                 "peer handshake received"
             );
 
-            let keys = derive_session_keys(
-                PeerRole::Host,
-                &id.session_id,
-                id.local_secret,
-                handshake.public_key,
-            )?;
-
-            // Compute our outbound confirmation MAC and the expected peer MAC.
-            let our_mac = compute_handshake_mac(
-                &keys.tx,
-                &id.local_public,
-                &handshake.public_key,
-                &id.session_id,
-            );
-            let peer_mac = compute_handshake_mac(
-                &keys.rx,
-                &handshake.public_key,
-                &id.local_public,
-                &id.session_id,
-            );
-
-            chan.channel = Some(SecureChannel::new(keys));
-            chan.confirmed = false;
-            chan.expected_peer_mac = Some(peer_mac);
-
-            send_peer_frame(
-                relay_tx,
-                &id.session_id,
-                PeerFrame::HandshakeConfirm(HandshakeConfirm { mac: our_mac }),
-            )?;
+            ctx.chan.channel = Some(hs.channel);
+            ctx.chan.confirmed = false;
+            ctx.chan.expected_peer_mac = Some(hs.expected_peer_mac);
         }
         PeerFrame::HandshakeConfirm(confirm) => {
-            let Some(expected) = &chan.expected_peer_mac else {
-                warn!(session_id = %id.session_id, "received HandshakeConfirm without pending handshake");
-                return Ok(());
-            };
-
-            if confirm.mac != *expected {
-                warn!(session_id = %id.session_id, "handshake confirmation MAC mismatch — tearing down channel");
-                chan.reset();
+            if !verify_handshake_confirm(&confirm, &ctx.chan) {
+                warn!(session_id = %ctx.identity.session_id, "handshake confirmation MAC mismatch — tearing down channel");
+                ctx.chan.reset();
                 return Ok(());
             }
 
-            tui_state.status = PeerStatus::Secure;
-            tui_state.push_log(LogLevel::Success, "E2E encryption established");
-            info!(session_id = %id.session_id, "handshake confirmed, channel trusted");
-            chan.confirmed = true;
-            chan.expected_peer_mac = None;
+            ctx.tui_state.status = PeerStatus::Secure;
+            ctx.tui_state.push_log(LogLevel::Success, "E2E encryption established");
+            info!(session_id = %ctx.identity.session_id, "handshake confirmed, channel trusted");
+            ctx.chan.confirmed = true;
+            ctx.chan.expected_peer_mac = None;
 
             // Replay scrollback first so reconnecting clients catch up on
             // output that was produced while they were disconnected.
-            let replay = scrollback.drain();
+            let replay = ctx.scrollback.drain();
             if !replay.is_empty() {
                 let total_bytes: usize = replay.iter().map(Vec::len).sum();
-                tui_state.push_log(
+                ctx.tui_state.push_log(
                     LogLevel::Info,
                     format!("Sending scrollback ({:.1} KB)", total_bytes as f64 / 1024.0),
                 );
                 info!(
-                    session_id = %id.session_id,
+                    session_id = %ctx.identity.session_id,
                     chunks = replay.len(),
                     bytes = total_bytes,
                     "replaying scrollback"
                 );
                 for bytes in replay {
-                    if let Some(ch) = chan.channel.as_mut() {
+                    if let Some(ch) = ctx.chan.channel.as_mut() {
                         let sealed = ch.seal(&SecureMessage::PtyOutput(bytes))?;
-                        send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
+                        send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, PeerFrame::Secure(sealed))?;
                     }
                 }
             }
 
             // Then drain the handshake-window backlog (output produced
             // between handshake start and confirm).
-            while let Some(bytes) = output_backlog.pop_front() {
-                if let Some(ch) = chan.channel.as_mut() {
+            while let Some(bytes) = ctx.output_backlog.pop_front() {
+                if let Some(ch) = ctx.chan.channel.as_mut() {
                     let sealed = ch.seal(&SecureMessage::PtyOutput(bytes))?;
-                    send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
+                    send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, PeerFrame::Secure(sealed))?;
                 }
             }
 
             let notice = SecureMessage::Notification(protocol::protocol::PushNotification {
-                title: format!("Connected to {}", id.tool_name),
+                title: format!("Connected to {}", ctx.identity.tool_name),
                 body: "Session encryption established".to_string(),
             });
-            if let Some(ch) = chan.channel.as_mut() {
+            if let Some(ch) = ctx.chan.channel.as_mut() {
                 let sealed = ch.seal(&notice)?;
-                send_peer_frame(relay_tx, &id.session_id, PeerFrame::Secure(sealed))?;
+                send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, PeerFrame::Secure(sealed))?;
             }
 
         }
         PeerFrame::Secure(sealed) => {
-            if !chan.confirmed {
+            if !ctx.chan.confirmed {
                 return Ok(());
             }
-            let Some(channel) = chan.channel.as_mut() else {
+            let Some(channel) = ctx.chan.channel.as_mut() else {
                 return Ok(());
             };
             let message = channel.open(&sealed)?;
@@ -605,12 +565,7 @@ async fn run_takeover(
     event_rx: &mut Option<mpsc::Receiver<protocol::protocol::AgentEvent>>,
     watcher_log_rx: &mut Option<mpsc::Receiver<String>>,
     relay: &mut RelayConnection,
-    relay_tx: &mpsc::Sender<RelayMessage>,
-    chan: &mut ChannelState,
-    output_backlog: &mut VecDeque<Vec<u8>>,
-    scrollback: &mut ScrollbackBuffer,
-    identity: &SessionIdentity,
-    tui_state: &mut TuiState,
+    ctx: &mut HostContext,
 ) -> anyhow::Result<()> {
     use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
     use tokio::io::{AsyncWriteExt, stdout};
@@ -714,15 +669,15 @@ async fn run_takeover(
             output = output_rx.recv() => {
                 let Some(bytes) = output else { break; };
                 let len = bytes.len() as u64;
-                scrollback.push(bytes.clone());
+                ctx.scrollback.push(bytes.clone());
                 out.write_all(&bytes).await?;
                 out.flush().await?;
-                if chan.confirmed {
-                    if let Some(channel) = chan.channel.as_mut() {
+                if ctx.chan.confirmed {
+                    if let Some(channel) = ctx.chan.channel.as_mut() {
                         if let Ok(sealed) = channel.seal(&SecureMessage::PtyOutput(bytes)) {
-                            let _ = send_peer_frame(relay_tx, &identity.session_id, PeerFrame::Secure(sealed));
+                            let _ = send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, PeerFrame::Secure(sealed));
                         }
-                        tui_state.bytes_sent += len;
+                        ctx.tui_state.bytes_sent += len;
                     }
                 }
             }
@@ -741,10 +696,10 @@ async fn run_takeover(
             // ── JSONL watcher: agent events → relay ──
             agent_event = async { event_rx.as_mut().unwrap().recv().await }, if event_rx.is_some() => {
                 let Some(evt) = agent_event else { continue; };
-                if chan.confirmed {
-                    if let Some(channel) = chan.channel.as_mut() {
+                if ctx.chan.confirmed {
+                    if let Some(channel) = ctx.chan.channel.as_mut() {
                         if let Ok(sealed) = channel.seal(&SecureMessage::AgentEvent(evt)) {
-                            let _ = send_peer_frame(relay_tx, &identity.session_id, PeerFrame::Secure(sealed));
+                            let _ = send_peer_frame(&ctx.relay_tx, &ctx.identity.session_id, PeerFrame::Secure(sealed));
                         }
                     }
                 }
@@ -754,23 +709,14 @@ async fn run_takeover(
             // ── Relay inbound (phone messages) ──
             inbound = relay.recv() => {
                 if let Some(RelayMessage::Route(route)) = inbound {
-                    if route.session_id == identity.session_id {
-                        let _ = handle_route(
-                            route,
-                            identity,
-                            pty,
-                            chan,
-                            output_backlog,
-                            scrollback,
-                            relay_tx,
-                            tui_state,
-                        );
+                    if route.session_id == ctx.identity.session_id {
+                        let _ = handle_route(route, pty, ctx);
                     }
                 }
             }
             // ── Heartbeat ──
             _ = heartbeat.tick() => {
-                let _ = relay_tx.try_send(RelayMessage::Ping(now_millis()));
+                let _ = ctx.relay_tx.try_send(RelayMessage::Ping(now_millis()));
             }
         }
     }
@@ -807,9 +753,6 @@ async fn connect_host(
     .await
 }
 
-/// Maximum number of reconnect attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
 async fn reconnect_host(
     relay_url: &str,
     session_id: &str,
@@ -817,40 +760,16 @@ async fn reconnect_host(
     resume_token: &str,
     api_key: Option<&str>,
 ) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
-    let mut delay = Duration::from_secs(1);
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-        tokio::select! {
-            result = connect_host(
-                relay_url,
-                session_id,
-                pairing_code,
-                Some(resume_token.to_string()),
-                api_key,
-            ) => {
-                match result {
-                    Ok(connection) => return Ok(connection),
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            attempt = attempt,
-                            max = MAX_RECONNECT_ATTEMPTS,
-                            "host reconnect attempt failed"
-                        );
-                    }
-                }
-            }
-            _ = shutdown_signal() => {
-                return Err(anyhow::anyhow!("reconnect interrupted by shutdown signal"));
-            }
-        }
-        if attempt < MAX_RECONNECT_ATTEMPTS {
-            sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(30));
-        }
-    }
-    Err(anyhow::anyhow!(
-        "failed to reconnect after {MAX_RECONNECT_ATTEMPTS} attempts"
-    ))
+    reconnect_with_backoff("host", || {
+        connect_host(
+            relay_url,
+            session_id,
+            pairing_code,
+            Some(resume_token.to_string()),
+            api_key,
+        )
+    })
+    .await
 }
 
 fn queue_backlog(queue: &mut VecDeque<Vec<u8>>, bytes: Vec<u8>) {
