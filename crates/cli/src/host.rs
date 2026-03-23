@@ -37,8 +37,8 @@ struct SessionIdentity {
 /// handle_route, and takeover mode to avoid passing many individual parameters.
 struct HostContext {
     chan: ChannelState,
-    output_backlog: VecDeque<Vec<u8>>,
-    scrollback: ScrollbackBuffer,
+    output_backlog: BoundedByteBuffer,
+    scrollback: BoundedByteBuffer,
     relay_tx: mpsc::Sender<RelayMessage>,
     identity: SessionIdentity,
     tui_state: TuiState,
@@ -241,8 +241,8 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
 
     let mut ctx = HostContext {
         chan: ChannelState::new(),
-        output_backlog: VecDeque::new(),
-        scrollback: ScrollbackBuffer::new(),
+        output_backlog: BoundedByteBuffer::new(crate::constants::OUTPUT_BACKLOG_CAP),
+        scrollback: BoundedByteBuffer::new(SCROLLBACK_CAPACITY),
         relay_tx,
         identity,
         tui_state,
@@ -278,7 +278,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                         }
                         ctx.tui_state.bytes_sent += len;
                     } else {
-                        queue_backlog(&mut ctx.output_backlog, bytes);
+                        ctx.output_backlog.push(bytes);
                     }
                 }
                 // ── JSONL watcher: agent events (for structured-capable tools) ──
@@ -468,7 +468,7 @@ fn handle_route(
 
             // Then drain the handshake-window backlog (output produced
             // between handshake start and confirm).
-            while let Some(bytes) = ctx.output_backlog.pop_front() {
+            for bytes in ctx.output_backlog.drain() {
                 ctx.send_secure(&SecureMessage::PtyOutput(bytes))?;
             }
 
@@ -733,44 +733,35 @@ async fn reconnect_host(
     .await
 }
 
-fn queue_backlog(queue: &mut VecDeque<Vec<u8>>, bytes: Vec<u8>) {
-    queue.push_back(bytes);
-    let mut total_bytes: usize = queue.iter().map(Vec::len).sum();
-    while total_bytes > crate::constants::OUTPUT_BACKLOG_CAP {
-        if let Some(front) = queue.pop_front() {
-            total_bytes = total_bytes.saturating_sub(front.len());
-        } else {
-            break;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Scrollback buffer: captures recent PTY output so reconnecting clients
-// can catch up without a full session replay.
-// ---------------------------------------------------------------------------
-
 /// Maximum scrollback size in bytes (128KB).
 const SCROLLBACK_CAPACITY: usize = 128 * 1024;
 
-struct ScrollbackBuffer {
+// ---------------------------------------------------------------------------
+// Bounded byte buffer: a VecDeque<Vec<u8>> with a byte-capacity limit.
+// Used for both scrollback (reconnect replay) and the handshake-window
+// output backlog. Oldest chunks are evicted when the cap is exceeded.
+// ---------------------------------------------------------------------------
+
+struct BoundedByteBuffer {
     chunks: VecDeque<Vec<u8>>,
     total_bytes: usize,
+    capacity: usize,
 }
 
-impl ScrollbackBuffer {
-    fn new() -> Self {
+impl BoundedByteBuffer {
+    fn new(capacity: usize) -> Self {
         Self {
             chunks: VecDeque::new(),
             total_bytes: 0,
+            capacity,
         }
     }
 
-    /// Append a chunk of PTY output, evicting oldest chunks if over capacity.
+    /// Append a chunk, evicting oldest chunks if over capacity.
     fn push(&mut self, bytes: Vec<u8>) {
         self.total_bytes += bytes.len();
         self.chunks.push_back(bytes);
-        while self.total_bytes > SCROLLBACK_CAPACITY {
+        while self.total_bytes > self.capacity {
             if let Some(front) = self.chunks.pop_front() {
                 self.total_bytes -= front.len();
             } else {
@@ -779,13 +770,11 @@ impl ScrollbackBuffer {
         }
     }
 
-    /// Drain all buffered chunks for replay, leaving the buffer empty.
+    /// Drain all buffered chunks, leaving the buffer empty.
     fn drain(&mut self) -> Vec<Vec<u8>> {
         self.total_bytes = 0;
         self.chunks.drain(..).collect()
     }
-
-
 }
 
 fn initial_size() -> (u16, u16) {
