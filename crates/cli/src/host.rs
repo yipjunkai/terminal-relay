@@ -192,7 +192,10 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     store.save(&record)?;
 
     // ── Set up TUI ──────────────────────────────────────────────────
-    let qr_lines = tui::qr_to_lines(&pairing_uri).unwrap_or_default();
+    let qr = tui::qr_to_lines(&pairing_uri).unwrap_or_else(|_| tui::QrCode {
+        lines: vec![],
+        visible_width: 0,
+    });
 
     let tui_state = TuiState::new(
         SessionInfo {
@@ -200,9 +203,17 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
             session_id: session_id.clone(),
             relay_url: relay_url.clone(),
             fingerprint: local_fingerprint.clone(),
+            pairing_uri: pairing_uri.clone(),
         },
-        qr_lines,
+        qr,
     );
+
+    // Prevent system idle sleep while the session is active.
+    let _awake = keepawake::Builder::default()
+        .display(false)
+        .idle(true)
+        .reason("farwatch session active")
+        .create();
 
     let mut tui_handle = Tui::new()?;
     let mut tui_state = tui_state;
@@ -359,7 +370,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                     let _ = ctx.relay_tx.try_send(RelayMessage::Ping(now_millis()));
                 }
                 _ = redraw.tick() => {
-                    match tui_handle.poll_action(Duration::ZERO)? {
+                    match tui_handle.poll_action(Duration::ZERO, &mut ctx.tui_state)? {
                         TuiAction::Quit => {
                             ctx.tui_state.push_log(LogLevel::Info, "Shutting down...");
                             tui_handle.draw(&ctx.tui_state)?;
@@ -373,7 +384,20 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                             tui_handle.suspend()?;
                             run_takeover(&pty, &mut output_rx, &mut event_rx, &mut watcher_log_rx, &mut relay, &mut ctx).await?;
                             tui_handle.resume()?;
+
+                            // Sync TUI status with actual channel state after takeover.
+                            if ctx.chan.is_confirmed() {
+                                ctx.tui_state.status = PeerStatus::Secure;
+                            } else if ctx.chan.has_channel() {
+                                ctx.tui_state.status = PeerStatus::Handshaking;
+                            }
+                            // Disconnected/WaitingForPeer already set by takeover loop if needed.
+
                             ctx.tui_state.push_log(LogLevel::Info, "Returned to dashboard");
+                        }
+                        TuiAction::CopyUri => {
+                            tui::copy_to_clipboard(&ctx.tui_state.info.pairing_uri);
+                            ctx.tui_state.push_log(LogLevel::Info, "Pairing URI copied to clipboard");
                         }
                         TuiAction::None => {}
                     }
@@ -667,12 +691,31 @@ async fn run_takeover(
             }
             // ── JSONL watcher: log (ignored during takeover, no TUI) ──
             _log = async { watcher_log_rx.as_mut().unwrap().recv().await }, if watcher_log_rx.is_some() => {}
-            // ── Relay inbound (phone messages) ──
+            // ── Relay inbound (phone messages + status) ──
             inbound = relay.recv() => {
-                if let Some(RelayMessage::Route(route)) = inbound {
-                    if route.session_id == ctx.identity.session_id {
-                        let _ = handle_route(route, pty, ctx);
+                match inbound {
+                    Some(RelayMessage::Route(route)) => {
+                        if route.session_id == ctx.identity.session_id {
+                            let _ = handle_route(route, pty, ctx);
+                        }
                     }
+                    Some(RelayMessage::PeerStatus(status)) => {
+                        if status.role == PeerRole::Client && !status.online {
+                            ctx.chan.reset();
+                            ctx.tui_state.status = PeerStatus::WaitingForPeer;
+                            ctx.tui_state.push_log(LogLevel::Warning, "Client disconnected during takeover");
+                        }
+                    }
+                    Some(RelayMessage::Error(err)) => {
+                        ctx.tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
+                    }
+                    None => {
+                        // Relay connection lost — exit takeover so main loop can reconnect.
+                        ctx.tui_state.status = PeerStatus::Disconnected;
+                        ctx.tui_state.push_log(LogLevel::Warning, "Relay disconnected during takeover");
+                        break;
+                    }
+                    _ => {}
                 }
             }
             // ── Heartbeat ──
