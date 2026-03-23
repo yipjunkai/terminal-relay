@@ -180,7 +180,7 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                 }
             }
             _ = heartbeat.tick() => {
-                let _ = relay_tx.send(RelayMessage::Ping(now_millis()));
+                let _ = relay_tx.try_send(RelayMessage::Ping(now_millis()));
                 send_resize(&relay_tx, &pairing.session_id, &mut chan)?;
             }
             resize_event = resize_rx.recv() => {
@@ -234,7 +234,7 @@ async fn handle_route(
     local_secret: [u8; 32],
     local_public: &[u8; 32],
     chan: &mut ChannelState,
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    relay_tx: &mpsc::Sender<RelayMessage>,
     stdout: &mut tokio::io::Stdout,
 ) -> anyhow::Result<RouteAction> {
     let frame = decode_peer_frame(&route.payload)?;
@@ -387,7 +387,7 @@ async fn handle_route(
 }
 
 fn send_resize(
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    relay_tx: &mpsc::Sender<RelayMessage>,
     session_id: &str,
     chan: &mut ChannelState,
 ) -> anyhow::Result<()> {

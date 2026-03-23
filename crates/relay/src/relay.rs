@@ -20,9 +20,13 @@ use protocol::protocol::{
 
 use crate::auth::{ApiKeyPayload, AuthState};
 
+/// Channel capacity for per-peer relay message queues. Provides backpressure
+/// instead of unbounded memory growth when a peer is slow to consume.
+const PEER_CHANNEL_CAPACITY: usize = 1024;
+
 #[derive(Clone)]
 struct PeerSlot {
-    sender: Option<mpsc::UnboundedSender<RelayMessage>>,
+    sender: Option<mpsc::Sender<RelayMessage>>,
     resume_token: String,
     connected: bool,
     last_seen: Instant,
@@ -276,7 +280,7 @@ impl RelayState {
     fn register(
         &self,
         request: &RegisterRequest,
-        sender: mpsc::UnboundedSender<RelayMessage>,
+        sender: mpsc::Sender<RelayMessage>,
         ip: IpAddr,
     ) -> Result<RegisterResponse, String> {
         validate_register_request(request)?;
@@ -447,7 +451,7 @@ impl RelayState {
         let target = session.slot(target_role);
         if let Some(sender) = &target.sender {
             sender
-                .send(RelayMessage::Route(route))
+                .try_send(RelayMessage::Route(route))
                 .map_err(|_| "failed forwarding payload to peer".to_string())?;
             session.last_activity = Instant::now();
             return Ok(());
@@ -469,7 +473,7 @@ impl RelayState {
                 role,
                 online,
             });
-            if sender.send(message).is_err() {
+            if sender.try_send(message).is_err() {
                 debug!(session_id = %session_id, "peer status delivery failed");
             }
         }
@@ -680,7 +684,7 @@ async fn handle_socket(
         });
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<RelayMessage>();
+    let (tx, mut rx) = mpsc::channel::<RelayMessage>(PEER_CHANNEL_CAPACITY);
     let register_response = match state.register(&register_request, tx.clone(), ip) {
         Ok(registered) => registered,
         Err(message) => {
@@ -715,7 +719,7 @@ async fn handle_socket(
         &register_request.session_id,
         register_request.role.opposite(),
     ) {
-        let _ = tx.send(RelayMessage::PeerStatus(PeerStatus {
+        let _ = tx.try_send(RelayMessage::PeerStatus(PeerStatus {
             session_id: register_request.session_id.clone(),
             role: register_request.role.opposite(),
             online: true,
@@ -736,23 +740,23 @@ async fn handle_socket(
                                 // Validate the Route targets the sender's own session,
                                 // preventing cross-session message injection.
                                 if route.session_id != register_request.session_id {
-                                    let _ = tx.send(RelayMessage::Error(RelayError {
+                                    let _ = tx.try_send(RelayMessage::Error(RelayError {
                                         message: "route session_id does not match registered session".into(),
                                     }));
                                 } else if let Err(message) = state.route(register_request.role, route) {
-                                    let _ = tx.send(RelayMessage::Error(RelayError { message }));
+                                    let _ = tx.try_send(RelayMessage::Error(RelayError { message }));
                                 }
                             }
                             Ok(RelayMessage::Ping(value)) => {
-                                let _ = tx.send(RelayMessage::Pong(value));
+                                let _ = tx.try_send(RelayMessage::Pong(value));
                             }
                             Ok(_) => {
-                                let _ = tx.send(RelayMessage::Error(RelayError {
+                                let _ = tx.try_send(RelayMessage::Error(RelayError {
                                     message: "unsupported relay frame".into(),
                                 }));
                             }
                             Err(err) => {
-                                let _ = tx.send(RelayMessage::Error(RelayError {
+                                let _ = tx.try_send(RelayMessage::Error(RelayError {
                                     message: format!("decode error: {err}"),
                                 }));
                             }

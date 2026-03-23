@@ -351,7 +351,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                     }
                 }
                 _ = heartbeat.tick() => {
-                    let _ = relay_tx.send(RelayMessage::Ping(now_millis()));
+                    let _ = relay_tx.try_send(RelayMessage::Ping(now_millis()));
                 }
                 _ = redraw.tick() => {
                     match tui_handle.poll_action(Duration::ZERO)? {
@@ -414,7 +414,7 @@ fn handle_route(
     chan: &mut ChannelState,
     output_backlog: &mut VecDeque<Vec<u8>>,
     scrollback: &mut ScrollbackBuffer,
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    relay_tx: &mpsc::Sender<RelayMessage>,
     tui_state: &mut TuiState,
 ) -> anyhow::Result<()> {
     let frame = decode_peer_frame(&route.payload)?;
@@ -605,7 +605,7 @@ async fn run_takeover(
     event_rx: &mut Option<mpsc::Receiver<protocol::protocol::AgentEvent>>,
     watcher_log_rx: &mut Option<mpsc::Receiver<String>>,
     relay: &mut RelayConnection,
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    relay_tx: &mpsc::Sender<RelayMessage>,
     chan: &mut ChannelState,
     output_backlog: &mut VecDeque<Vec<u8>>,
     scrollback: &mut ScrollbackBuffer,
@@ -770,7 +770,7 @@ async fn run_takeover(
             }
             // ── Heartbeat ──
             _ = heartbeat.tick() => {
-                let _ = relay_tx.send(RelayMessage::Ping(now_millis()));
+                let _ = relay_tx.try_send(RelayMessage::Ping(now_millis()));
             }
         }
     }

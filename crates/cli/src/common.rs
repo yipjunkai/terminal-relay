@@ -39,7 +39,7 @@ pub fn now_millis() -> u64 {
 
 pub fn send_handshake(
     session_id: &str,
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    relay_tx: &mpsc::Sender<RelayMessage>,
     public_key: &[u8; 32],
     fingerprint: &str,
     tool_name: Option<String>,
@@ -54,17 +54,24 @@ pub fn send_handshake(
 }
 
 pub fn send_peer_frame(
-    relay_tx: &mpsc::UnboundedSender<RelayMessage>,
+    relay_tx: &mpsc::Sender<RelayMessage>,
     session_id: &str,
     frame: PeerFrame,
 ) -> anyhow::Result<()> {
     let payload = encode_peer_frame(&frame)?;
     relay_tx
-        .send(RelayMessage::Route(RelayRoute {
+        .try_send(RelayMessage::Route(RelayRoute {
             session_id: session_id.to_string(),
             payload,
         }))
-        .map_err(|_| anyhow::anyhow!("relay send channel closed"))
+        .map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                anyhow::anyhow!("relay send channel full (backpressure)")
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow::anyhow!("relay send channel closed")
+            }
+        })
 }
 
 /// Wait for SIGINT (ctrl-c) or SIGTERM.

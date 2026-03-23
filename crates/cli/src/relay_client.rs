@@ -13,9 +13,13 @@ use protocol::protocol::{
 /// Timeout for the initial WebSocket connect + registration exchange.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Channel capacity for relay message queues. Provides backpressure instead of
+/// unbounded memory growth when a peer is slow to consume messages.
+const CHANNEL_CAPACITY: usize = 1024;
+
 pub struct RelayConnection {
-    sender: mpsc::UnboundedSender<RelayMessage>,
-    receiver: mpsc::UnboundedReceiver<RelayMessage>,
+    sender: mpsc::Sender<RelayMessage>,
+    receiver: mpsc::Receiver<RelayMessage>,
 }
 
 impl RelayConnection {
@@ -91,8 +95,8 @@ impl RelayConnection {
             }
         };
 
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<RelayMessage>();
-        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<RelayMessage>();
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<RelayMessage>(CHANNEL_CAPACITY);
+        let (inbound_tx, inbound_rx) = mpsc::channel::<RelayMessage>(CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
             while let Some(message) = outbound_rx.recv().await {
@@ -114,7 +118,7 @@ impl RelayConnection {
                 match frame {
                     Ok(Message::Binary(bytes)) => match decode_relay(&bytes) {
                         Ok(message) => {
-                            if inbound_tx.send(message).is_err() {
+                            if inbound_tx.send(message).await.is_err() {
                                 break;
                             }
                         }
@@ -142,7 +146,7 @@ impl RelayConnection {
         ))
     }
 
-    pub fn sender(&self) -> mpsc::UnboundedSender<RelayMessage> {
+    pub fn sender(&self) -> mpsc::Sender<RelayMessage> {
         self.sender.clone()
     }
 
