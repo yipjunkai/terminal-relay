@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Channel capacity for PTY output chunks.
 const PTY_OUTPUT_CHANNEL_CAPACITY: usize = 512;
@@ -74,23 +74,32 @@ impl PtySession {
             let mut buffer = [0_u8; crate::constants::READ_BUFFER_SIZE];
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        debug!("PTY reader got EOF");
+                        break;
+                    }
                     Ok(n) => {
                         if output_tx.blocking_send(buffer[..n].to_vec()).is_err() {
+                            debug!("PTY output channel closed");
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(err) => {
+                        warn!(error = %err, "PTY read failed");
+                        break;
+                    }
                 }
             }
         });
 
         thread::spawn(move || {
             while let Ok(bytes) = input_rx.recv() {
-                if writer.write_all(&bytes).is_err() {
+                if let Err(err) = writer.write_all(&bytes) {
+                    warn!(error = %err, "PTY write failed");
                     break;
                 }
-                if writer.flush().is_err() {
+                if let Err(err) = writer.flush() {
+                    warn!(error = %err, "PTY flush failed");
                     break;
                 }
             }
