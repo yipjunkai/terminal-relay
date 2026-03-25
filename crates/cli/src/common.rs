@@ -6,9 +6,7 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use protocol::{
-    crypto::{
-        HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys,
-    },
+    crypto::{HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys},
     protocol::{
         Handshake, HandshakeConfirm, PeerFrame, PeerRole, RelayMessage, RelayRoute,
         encode_peer_frame,
@@ -79,14 +77,19 @@ impl ChannelState {
     /// Get the expected peer MAC (only available during Handshaking).
     pub fn expected_peer_mac(&self) -> Option<&[u8; 32]> {
         match self {
-            Self::Handshaking { expected_peer_mac, .. } => Some(expected_peer_mac),
+            Self::Handshaking {
+                expected_peer_mac, ..
+            } => Some(expected_peer_mac),
             _ => None,
         }
     }
 
     /// Transition from Disconnected to Handshaking with the given channel and expected MAC.
     pub fn start_handshake(&mut self, channel: SecureChannel, expected_peer_mac: [u8; 32]) {
-        *self = Self::Handshaking { channel, expected_peer_mac };
+        *self = Self::Handshaking {
+            channel,
+            expected_peer_mac,
+        };
     }
 }
 
@@ -199,6 +202,7 @@ pub struct HandshakeResult {
 ///
 /// Returns `None` if the handshake should be ignored (duplicate or stale).
 /// Returns `Err` on fingerprint mismatch (attach only) or crypto failure.
+#[allow(clippy::too_many_arguments)]
 pub fn process_inbound_handshake(
     role: PeerRole,
     session_id: &str,
@@ -223,34 +227,19 @@ pub fn process_inbound_handshake(
     }
 
     // Fingerprint verification (attach only).
-    if let Some(expected) = expected_fingerprint {
-        if handshake.fingerprint != expected {
-            return Err(anyhow::anyhow!(
-                "fingerprint mismatch: expected {expected}, received {}",
-                handshake.fingerprint
-            ));
-        }
+    if let Some(expected) = expected_fingerprint
+        && handshake.fingerprint != expected
+    {
+        return Err(anyhow::anyhow!(
+            "fingerprint mismatch: expected {expected}, received {}",
+            handshake.fingerprint
+        ));
     }
 
-    let keys = derive_session_keys(
-        role,
-        session_id,
-        local_secret,
-        handshake.public_key,
-    )?;
+    let keys = derive_session_keys(role, session_id, local_secret, handshake.public_key)?;
 
-    let our_mac = compute_handshake_mac(
-        &keys.tx,
-        local_public,
-        &handshake.public_key,
-        session_id,
-    );
-    let peer_mac = compute_handshake_mac(
-        &keys.rx,
-        &handshake.public_key,
-        local_public,
-        session_id,
-    );
+    let our_mac = compute_handshake_mac(&keys.tx, local_public, &handshake.public_key, session_id);
+    let peer_mac = compute_handshake_mac(&keys.rx, &handshake.public_key, local_public, session_id);
 
     let channel = SecureChannel::new(keys);
 
@@ -269,10 +258,7 @@ pub fn process_inbound_handshake(
 
 /// Verify an inbound `HandshakeConfirm` MAC against the expected value.
 /// Returns `true` if valid, `false` if mismatch (caller should reset channel).
-pub fn verify_handshake_confirm(
-    confirm: &HandshakeConfirm,
-    chan: &ChannelState,
-) -> bool {
+pub fn verify_handshake_confirm(confirm: &HandshakeConfirm, chan: &ChannelState) -> bool {
     match chan.expected_peer_mac() {
         Some(expected) => confirm.mac == *expected,
         None => {

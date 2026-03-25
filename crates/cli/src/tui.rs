@@ -13,16 +13,16 @@ use crossterm::{
     },
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+        ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     },
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Padding, Paragraph, Wrap},
-    Frame, Terminal,
 };
 
 // ── Public state model ───────────────────────────────────────────────
@@ -179,9 +179,12 @@ impl Tui {
         execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
-            LeaveAlternateScreen
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
         )?;
-        self.terminal.show_cursor()?;
+        // Print a newline so the shell prompt starts on a clean line,
+        // avoiding leftover TUI artifacts on the last visible row.
+        println!();
         Ok(())
     }
 
@@ -247,7 +250,13 @@ impl Tui {
     /// Call `resume()` to restore.
     pub fn suspend(&mut self) -> anyhow::Result<()> {
         disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            crossterm::terminal::Clear(ClearType::All),
+            crossterm::cursor::MoveTo(0, 0)
+        )?;
         self.terminal.show_cursor()?;
         Ok(())
     }
@@ -255,7 +264,11 @@ impl Tui {
     /// Resume the TUI: re-enter alternate screen and raw mode.
     pub fn resume(&mut self) -> anyhow::Result<()> {
         enable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
         self.terminal.clear()?;
         Ok(())
     }
@@ -320,7 +333,7 @@ fn render(frame: &mut Frame, state: &TuiState) {
         0
     };
     let qr_height = state.qr_lines.len() as u16 + 3; // 1 blank + lines + 1 blank + 1 label
-                                                     // Show QR beside session info if it fits.
+    // Show QR beside session info if it fits.
     let available_width = inner.width;
     let available_height = inner.height.saturating_sub(7); // title(2)+spacer(1)+log(3)+status(1)
     let show_qr_beside =
@@ -544,7 +557,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TuiState) {
 /// Copy text to the system clipboard via the OSC 52 escape sequence.
 /// Works in most modern terminals (iTerm2, kitty, alacritty, WezTerm, ghostty).
 pub fn copy_to_clipboard(text: &str) {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let encoded = STANDARD.encode(text);
     // OSC 52: \x1b]52;c;<base64>\x07
     let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");

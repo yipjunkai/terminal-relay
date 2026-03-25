@@ -228,9 +228,7 @@ fn pick_and_save_default(tools: &[ToolCandidate]) -> anyhow::Result<ToolCommand>
         if let Event::Key(key) = event::read()? {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 {
-                        selected -= 1;
-                    }
+                    selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if selected + 1 < available.len() {
@@ -265,9 +263,16 @@ fn pick_and_save_default(tools: &[ToolCandidate]) -> anyhow::Result<ToolCommand>
 }
 
 /// Returns `true` if a known tool supports structured JSON output
-/// (`--output-format stream-json` for Claude Code).
+/// (`--output-format stream-json` for Claude Code, SSE API for OpenCode).
 pub fn tool_supports_structured(name: &str) -> bool {
-    matches!(name, "claude")
+    matches!(name, "claude" | "opencode")
+}
+
+/// Returns `true` if a known tool supports a full HTTP API mode (no PTY needed).
+/// Tools with API support use an adapter that communicates via HTTP/SSE instead of
+/// spawning a PTY and tailing log files.
+pub fn tool_supports_api(name: &str) -> bool {
+    matches!(name, "opencode")
 }
 
 fn save_default(tool_name: &str) -> anyhow::Result<()> {
@@ -284,12 +289,20 @@ mod tests {
     // ── tool_supports_structured ─────────────────────────────────────
 
     #[test]
-    fn structured_claude_only() {
+    fn structured_supported_tools() {
         assert!(tool_supports_structured("claude"));
+        assert!(tool_supports_structured("opencode"));
         assert!(!tool_supports_structured("aider"));
-        assert!(!tool_supports_structured("opencode"));
         assert!(!tool_supports_structured(""));
         assert!(!tool_supports_structured("unknown-tool"));
+    }
+
+    #[test]
+    fn api_supported_tools() {
+        assert!(tool_supports_api("opencode"));
+        assert!(!tool_supports_api("claude"));
+        assert!(!tool_supports_api("aider"));
+        assert!(!tool_supports_api(""));
     }
 
     // ── known_tools ──────────────────────────────────────────────────

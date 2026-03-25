@@ -7,6 +7,7 @@ mod config;
 mod constants;
 mod host;
 mod jsonl_watcher;
+mod opencode_adapter;
 mod pty;
 mod relay_client;
 mod state;
@@ -128,20 +129,39 @@ async fn run_doctor() {
     use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 
     fn label(s: &str) {
-        let _ = crossterm::execute!(std::io::stdout(),
-            SetForegroundColor(Color::DarkGrey), Print(format!("  {:<14}", s)), ResetColor);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("  {:<14}", s)),
+            ResetColor
+        );
     }
     fn ok(s: &str) {
-        let _ = crossterm::execute!(std::io::stdout(),
-            SetForegroundColor(Color::Green), Print("✓ "), ResetColor, Print(format!("{s}\n")));
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            SetForegroundColor(Color::Green),
+            Print("✓ "),
+            ResetColor,
+            Print(format!("{s}\n"))
+        );
     }
     fn warn(s: &str) {
-        let _ = crossterm::execute!(std::io::stdout(),
-            SetForegroundColor(Color::Yellow), Print("! "), ResetColor, Print(format!("{s}\n")));
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            SetForegroundColor(Color::Yellow),
+            Print("! "),
+            ResetColor,
+            Print(format!("{s}\n"))
+        );
     }
     fn fail(s: &str) {
-        let _ = crossterm::execute!(std::io::stdout(),
-            SetForegroundColor(Color::Red), Print("✗ "), ResetColor, Print(format!("{s}\n")));
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            SetForegroundColor(Color::Red),
+            Print("✗ "),
+            ResetColor,
+            Print(format!("{s}\n"))
+        );
     }
 
     println!();
@@ -191,15 +211,22 @@ async fn run_doctor() {
     label("Relay");
     #[cfg(feature = "hosted")]
     {
-        let relay_url = format!("{}/healthz",
+        let relay_url = format!(
+            "{}/healthz",
             constants::DEFAULT_RELAY_URL
                 .replace("wss://", "https://")
                 .replace("ws://", "http://")
                 .replace("/ws", "")
         );
         match reqwest::get(&relay_url).await {
-            Ok(resp) if resp.status().is_success() => ok(&format!("{} (reachable)", constants::DEFAULT_RELAY_URL)),
-            Ok(resp) => warn(&format!("{} (HTTP {})", constants::DEFAULT_RELAY_URL, resp.status())),
+            Ok(resp) if resp.status().is_success() => {
+                ok(&format!("{} (reachable)", constants::DEFAULT_RELAY_URL))
+            }
+            Ok(resp) => warn(&format!(
+                "{} (HTTP {})",
+                constants::DEFAULT_RELAY_URL,
+                resp.status()
+            )),
             Err(_) => fail(&format!("{} (unreachable)", constants::DEFAULT_RELAY_URL)),
         }
     }

@@ -122,7 +122,20 @@ pub struct VoiceAction {
 
 // ── Structured agent events (for rich clients) ──
 
-/// Structured events emitted by an AI agent (e.g., Claude Code with `--output-format stream-json`).
+/// A single item in the agent's task/todo list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TodoItem {
+    /// Unique identifier for the todo item.
+    pub id: String,
+    /// Brief description of the task.
+    pub content: String,
+    /// Current status: "pending", "in_progress", "completed", or "cancelled".
+    pub status: String,
+    /// Priority level: "high", "medium", or "low".
+    pub priority: String,
+}
+
+/// Structured events emitted by an AI agent (e.g., Claude Code via JSONL, OpenCode via SSE API).
 /// Rich clients render these as native UI; terminal clients can ignore them via `Unknown` fallback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentEvent {
@@ -160,7 +173,7 @@ pub enum AgentEvent {
     },
     /// Agent turn completed.
     TurnCompleted {
-        /// "completed", "failed", or "cancelled".
+        /// "completed", "failed", "cancelled", or "idle".
         status: String,
     },
     /// Final session result (agent finished all work).
@@ -171,6 +184,43 @@ pub enum AgentEvent {
         duration_ms: u64,
         num_turns: u32,
     },
+
+    // ── Permission events (for tools requiring user approval) ──
+    /// A tool invocation requires user approval before execution.
+    /// Rich clients render an Allow/Deny card. Terminal clients fall back to PTY prompt.
+    PermissionRequest {
+        /// Permission ID (for responding via `ApproveToolUse`/`DenyToolUse`).
+        id: String,
+        /// Tool name (e.g. "Edit", "Bash", "Write").
+        tool: String,
+        /// Human-readable description of what the tool wants to do.
+        title: String,
+        /// Tool-specific details as a JSON string (file paths, commands, etc.).
+        metadata: String,
+    },
+    /// A previously requested permission has been resolved (by this or another client).
+    PermissionResolved {
+        /// Matches the `id` from `PermissionRequest`.
+        id: String,
+        /// Resolution: "allow" or "deny".
+        response: String,
+    },
+
+    // ── Session metadata events ──
+    /// The agent's task/todo list was updated (full replacement).
+    TodoUpdate { todos: Vec<TodoItem> },
+
+    /// Cumulative token usage and cost for the current session.
+    /// Emitted after each LLM step completes.
+    CostUpdate {
+        input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        /// Cumulative cost in USD for the session so far.
+        cost_usd: f64,
+    },
 }
 
 /// Commands sent from a rich client to control the agent session.
@@ -178,10 +228,12 @@ pub enum AgentEvent {
 pub enum AgentCommand {
     /// Send a text prompt to the agent.
     Prompt { text: String },
-    /// Approve a pending tool invocation.
+    /// Approve a pending tool invocation (id is the permission ID or tool call ID).
     ApproveToolUse { id: String },
-    /// Deny a pending tool invocation.
+    /// Deny a pending tool invocation (id is the permission ID or tool call ID).
     DenyToolUse { id: String, reason: Option<String> },
+    /// Abort the currently running session/turn.
+    AbortSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -593,6 +645,92 @@ mod tests {
         secure_msg_roundtrip(&SecureMessage::AgentCommand(AgentCommand::DenyToolUse {
             id: "toolu_abc456".to_string(),
             reason: None,
+        }));
+    }
+
+    #[test]
+    fn secure_agent_command_abort_session_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentCommand(AgentCommand::AbortSession));
+    }
+
+    // ── New AgentEvent variant roundtrip tests ──
+
+    #[test]
+    fn secure_agent_event_permission_request_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::PermissionRequest {
+            id: "perm_abc123".to_string(),
+            tool: "Edit".to_string(),
+            title: "Edit file src/main.rs".to_string(),
+            metadata: r#"{"path":"src/main.rs","lines":[10,20]}"#.to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_permission_resolved_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::PermissionResolved {
+            id: "perm_abc123".to_string(),
+            response: "allow".to_string(),
+        }));
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::PermissionResolved {
+            id: "perm_xyz789".to_string(),
+            response: "deny".to_string(),
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_todo_update_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TodoUpdate {
+            todos: vec![
+                TodoItem {
+                    id: "todo_1".to_string(),
+                    content: "Fix authentication bug".to_string(),
+                    status: "in_progress".to_string(),
+                    priority: "high".to_string(),
+                },
+                TodoItem {
+                    id: "todo_2".to_string(),
+                    content: "Write unit tests".to_string(),
+                    status: "pending".to_string(),
+                    priority: "medium".to_string(),
+                },
+                TodoItem {
+                    id: "todo_3".to_string(),
+                    content: "Update docs".to_string(),
+                    status: "completed".to_string(),
+                    priority: "low".to_string(),
+                },
+            ],
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_todo_update_empty_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::TodoUpdate {
+            todos: vec![],
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_cost_update_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::CostUpdate {
+            input_tokens: 15234,
+            output_tokens: 3421,
+            reasoning_tokens: 8012,
+            cache_read_tokens: 5000,
+            cache_write_tokens: 1200,
+            cost_usd: 0.0342,
+        }));
+    }
+
+    #[test]
+    fn secure_agent_event_cost_update_zero_roundtrip() {
+        secure_msg_roundtrip(&SecureMessage::AgentEvent(AgentEvent::CostUpdate {
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: 0.0,
         }));
     }
 

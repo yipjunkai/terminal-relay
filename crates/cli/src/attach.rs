@@ -11,14 +11,14 @@ use protocol::{
     crypto::{fingerprint, generate_key_pair},
     pairing::{PairingUri, parse_pairing_uri},
     protocol::{
-        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
-        RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
+        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole, RegisterRequest, RelayMessage,
+        RelayRoute, SecureMessage, decode_peer_frame,
     },
 };
 
 use crate::common::{
-    ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff,
-    send_handshake, send_peer_frame, shutdown_signal, verify_handshake_confirm,
+    ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff, send_handshake,
+    send_peer_frame, shutdown_signal, verify_handshake_confirm,
 };
 use crate::relay_client::RelayConnection;
 
@@ -102,7 +102,9 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(crate::constants::HEARTBEAT_INTERVAL_SECS));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(
+        crate::constants::HEARTBEAT_INTERVAL_SECS,
+    ));
 
     loop {
         tokio::select! {
@@ -448,7 +450,8 @@ mod tests {
 
     #[test]
     fn resolve_pairing_from_uri() {
-        let uri = "farwatch://pair?relay=wss://example.com/ws&session=abc-123&code=AAAAAA-BBBBBB-CCCCCC";
+        let uri =
+            "farwatch://pair?relay=wss://example.com/ws&session=abc-123&code=AAAAAA-BBBBBB-CCCCCC";
         let result = resolve_pairing(&args_with_uri(uri)).unwrap();
         assert_eq!(result.relay_url, "wss://example.com/ws");
         assert_eq!(result.session_id, "abc-123");
@@ -491,7 +494,12 @@ mod tests {
 
     #[test]
     fn resolve_pairing_missing_session_id() {
-        let args = args_manual(Some("wss://r.com/ws"), None, Some("CODE12-CODE34-CODE56"), None);
+        let args = args_manual(
+            Some("wss://r.com/ws"),
+            None,
+            Some("CODE12-CODE34-CODE56"),
+            None,
+        );
         let err = resolve_pairing(&args).unwrap_err();
         assert!(err.to_string().contains("--session-id"));
     }

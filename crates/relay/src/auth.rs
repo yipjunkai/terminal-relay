@@ -6,8 +6,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use tokio::sync::RwLock;
 use subtle::ConstantTimeEq;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -113,7 +113,10 @@ impl AuthState {
         mac.update(payload_json.as_bytes());
 
         let expected_sig = hex::encode(mac.finalize().into_bytes());
-        expected_sig.as_bytes().ct_eq(provided_sig.as_bytes()).into()
+        expected_sig
+            .as_bytes()
+            .ct_eq(provided_sig.as_bytes())
+            .into()
     }
 
     /// Periodically sync the revocation list from the control API.
@@ -128,7 +131,8 @@ impl AuthState {
         };
 
         let url = format!("{}/internal/revoked-keys", base_url);
-        let mut interval = tokio::time::interval(Duration::from_secs(REVOCATION_SYNC_INTERVAL_SECS));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(REVOCATION_SYNC_INTERVAL_SECS));
 
         loop {
             interval.tick().await;
@@ -244,8 +248,6 @@ impl AuthState {
 struct RevokedKeysResponse {
     revoked_key_ids: Vec<String>,
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -453,5 +455,4 @@ mod tests {
         let state = auth_state("", None);
         assert!(!state.is_enabled());
     }
-
 }

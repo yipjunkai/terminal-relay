@@ -131,21 +131,21 @@ fn watcher_loop(
                 match event.kind {
                     EventKind::Create(_) => {
                         // New file created — check if it's a newer .jsonl.
-                        if let Some(newest) = find_newest_jsonl(&project_dir) {
-                            if current_file.as_ref() != Some(&newest) {
-                                let _ = log_tx.blocking_send(format!(
-                                    "New session: {}",
-                                    newest.file_name().unwrap_or_default().to_string_lossy()
-                                ));
-                                current_file = Some(newest.clone());
-                                match fs::File::open(&newest) {
-                                    Ok(f) => {
-                                        file = Some(f);
-                                        remainder.clear();
-                                    }
-                                    Err(err) => {
-                                        let _ = log_tx.blocking_send(format!("Open error: {err}"));
-                                    }
+                        if let Some(newest) = find_newest_jsonl(&project_dir)
+                            && current_file.as_ref() != Some(&newest)
+                        {
+                            let _ = log_tx.blocking_send(format!(
+                                "New session: {}",
+                                newest.file_name().unwrap_or_default().to_string_lossy()
+                            ));
+                            current_file = Some(newest.clone());
+                            match fs::File::open(&newest) {
+                                Ok(f) => {
+                                    file = Some(f);
+                                    remainder.clear();
+                                }
+                                Err(err) => {
+                                    let _ = log_tx.blocking_send(format!("Open error: {err}"));
                                 }
                             }
                         }

@@ -4,8 +4,8 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm,
+    aead::{Aead, KeyInit},
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -180,13 +180,13 @@ impl SessionStore {
         {
             let entry = entry.map_err(|e| io_err("failed reading directory entry", e))?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    match self.load(stem) {
-                        Ok(record) => records.push(record),
-                        Err(e) => {
-                            tracing::warn!("skipping session file {}: {e}", path.display());
-                        }
+            if path.extension().and_then(|e| e.to_str()) == Some("json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                match self.load(stem) {
+                    Ok(record) => records.push(record),
+                    Err(e) => {
+                        tracing::warn!("skipping session file {}: {e}", path.display());
                     }
                 }
             }
@@ -488,7 +488,7 @@ mod tests {
         // Pre-create directory structure
         fs::create_dir_all(dir.path().join("sessions")).unwrap();
         // Write a state.key with wrong length
-        fs::write(dir.path().join("state.key"), &[0u8; 16]).unwrap();
+        fs::write(dir.path().join("state.key"), [0u8; 16]).unwrap();
 
         let err = SessionStore::new(dir.path().to_path_buf()).unwrap_err();
         assert!(matches!(err, StateError::InvalidKeyLength { actual: 16 }));

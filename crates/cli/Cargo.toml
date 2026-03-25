@@ -15,7 +15,7 @@ workspace = true
 # authentication (device flow, email registration, API key login), account
 # management, and browser-based activation. Without this feature, the CLI
 # is a standalone relay + PTY tool suitable for self-hosting.
-hosted = ["dep:reqwest", "dep:open"]
+hosted = ["dep:open"]
 
 [[bin]]
 name = "farwatch"
@@ -45,6 +45,7 @@ tokio = { version = "1.44", features = [
     "io-util",
     "io-std",
     "time",
+    "process",
 ] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", features = ["ring"], default-features = false }
@@ -56,8 +57,8 @@ zeroize = "1.8"
 notify = "7.0"
 protocol = { path = "../protocol" }
 
-# Hosted-service dependencies (optional, enabled by the "hosted" feature).
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
+# HTTP client — used by the OpenCode API adapter (always) and hosted service (when enabled).
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 open = { version = "5.3.3", optional = true }
 ratatui = "0.30.0"
 clap_complete = "4.6.0"

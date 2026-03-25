@@ -27,11 +27,22 @@ pub enum SessionError {
     AtCapacity { current: usize, max: usize },
     /// Per-IP session limit reached.
     #[allow(dead_code)] // ip kept for future logging/metrics
-    IpLimitReached { ip: IpAddr, current: usize, max: usize },
+    IpLimitReached {
+        ip: IpAddr,
+        current: usize,
+        max: usize,
+    },
     /// Per-user (tier-based) session limit reached.
-    UserLimitReached { tier: String, current: usize, max: usize },
+    UserLimitReached {
+        tier: String,
+        current: usize,
+        max: usize,
+    },
     /// No compatible protocol version between client and server.
-    ProtocolMismatch { client_range: String, server_range: String },
+    ProtocolMismatch {
+        client_range: String,
+        server_range: String,
+    },
     /// Client version string is unparseable or too old.
     ClientVersionInvalid(String),
     /// Request field validation failure.
@@ -62,10 +73,19 @@ impl std::fmt::Display for SessionError {
                 write!(f, "too many sessions from this IP ({current}/{max})")
             }
             Self::UserLimitReached { tier, current, max } => {
-                write!(f, "session limit reached ({current}/{max} for {tier} tier). Upgrade your plan for more sessions.")
+                write!(
+                    f,
+                    "session limit reached ({current}/{max} for {tier} tier). Upgrade your plan for more sessions."
+                )
             }
-            Self::ProtocolMismatch { client_range, server_range } => {
-                write!(f, "no compatible protocol version: client supports {client_range}, server supports {server_range}")
+            Self::ProtocolMismatch {
+                client_range,
+                server_range,
+            } => {
+                write!(
+                    f,
+                    "no compatible protocol version: client supports {client_range}, server supports {server_range}"
+                )
             }
             Self::ClientVersionInvalid(msg) => write!(f, "{msg}"),
             Self::InvalidRequest(msg) => write!(f, "{msg}"),
@@ -330,7 +350,7 @@ impl RelayState {
                     });
                     for slot in [&session.host, &session.client] {
                         if let Some(sender) = &slot.sender {
-                            let _ = sender.send(expiry_msg.clone());
+                            let _ = sender.try_send(expiry_msg.clone());
                         }
                     }
                     // Clean up IP and user tracking for expired sessions.
@@ -563,30 +583,42 @@ const MAX_RESUME_TOKEN_LEN: usize = 64;
 fn validate_register_request(request: &RegisterRequest) -> Result<(), SessionError> {
     // session_id: must be valid UUID v4 format (36 chars: 8-4-4-4-12 hex)
     if request.session_id.len() > MAX_SESSION_ID_LEN {
-        return Err(SessionError::InvalidRequest("session_id exceeds maximum length".into()));
+        return Err(SessionError::InvalidRequest(
+            "session_id exceeds maximum length".into(),
+        ));
     }
     if uuid::Uuid::parse_str(&request.session_id).is_err() {
-        return Err(SessionError::InvalidRequest("session_id is not a valid UUID".into()));
+        return Err(SessionError::InvalidRequest(
+            "session_id is not a valid UUID".into(),
+        ));
     }
 
     // pairing_code: expected format XXXXXX-XXXXXX-XXXXXX (20 chars, uppercase alphanumeric + dashes)
     if request.pairing_code.len() > MAX_PAIRING_CODE_LEN {
-        return Err(SessionError::InvalidRequest("pairing_code exceeds maximum length".into()));
+        return Err(SessionError::InvalidRequest(
+            "pairing_code exceeds maximum length".into(),
+        ));
     }
     if !is_valid_pairing_code(&request.pairing_code) {
-        return Err(SessionError::InvalidRequest("pairing_code has invalid format".into()));
+        return Err(SessionError::InvalidRequest(
+            "pairing_code has invalid format".into(),
+        ));
     }
 
     // client_version
     if request.client_version.len() > MAX_CLIENT_VERSION_LEN {
-        return Err(SessionError::InvalidRequest("client_version exceeds maximum length".into()));
+        return Err(SessionError::InvalidRequest(
+            "client_version exceeds maximum length".into(),
+        ));
     }
 
     // resume_token (optional)
     if let Some(token) = &request.resume_token
         && token.len() > MAX_RESUME_TOKEN_LEN
     {
-        return Err(SessionError::InvalidRequest("resume_token exceeds maximum length".into()));
+        return Err(SessionError::InvalidRequest(
+            "resume_token exceeds maximum length".into(),
+        ));
     }
 
     Ok(())
@@ -651,10 +683,8 @@ pub async fn ws_handler(
                     ip = %addr.ip(),
                     "authenticated WebSocket upgrade"
                 );
-                ws.on_upgrade(move |socket| {
-                    handle_socket(socket, state, addr.ip(), Some(payload))
-                })
-                .into_response()
+                ws.on_upgrade(move |socket| handle_socket(socket, state, addr.ip(), Some(payload)))
+                    .into_response()
             }
             None => {
                 warn!(ip = %addr.ip(), "WebSocket upgrade rejected: invalid or revoked API key");
@@ -734,7 +764,8 @@ async fn handle_socket(
                         ip = %ip,
                         "rejecting unauthenticated client: session not found or host not authenticated"
                     );
-                    let _ = send_error(&mut sink, "session not found or requires authentication").await;
+                    let _ =
+                        send_error(&mut sink, "session not found or requires authentication").await;
                     return;
                 }
                 info!(
@@ -768,16 +799,21 @@ async fn handle_socket(
 
     // Track per-user session count (host role only, since hosts create sessions)
     if register_request.role == PeerRole::Host
-        && let Some(ref payload) = api_key_payload {
-            state.track_user(&payload.uid);
-            // Store user_id on the session slot for cleanup
-            if let Some(mut session) = state.sessions.get_mut(&register_request.session_id) {
-                session.host_user_id = Some(payload.uid.clone());
-            }
+        && let Some(ref payload) = api_key_payload
+    {
+        state.track_user(&payload.uid);
+        // Store user_id on the session slot for cleanup
+        if let Some(mut session) = state.sessions.get_mut(&register_request.session_id) {
+            session.host_user_id = Some(payload.uid.clone());
         }
+    }
 
     let registered_message = RelayMessage::Registered(register_response.clone());
-    if send_wire(&mut sink, &registered_message).await.map(|_| ()).is_err() {
+    if send_wire(&mut sink, &registered_message)
+        .await
+        .map(|_| ())
+        .is_err()
+    {
         return;
     }
 
@@ -866,9 +902,10 @@ async fn handle_socket(
 
     // Untrack per-user session count
     if register_request.role == PeerRole::Host
-        && let Some(ref payload) = api_key_payload {
-            state.untrack_user(&payload.uid);
-        }
+        && let Some(ref payload) = api_key_payload
+    {
+        state.untrack_user(&payload.uid);
+    }
 
     let duration_ms = connected_at.elapsed().as_millis() as u64;
     info!(
@@ -1041,25 +1078,43 @@ mod tests {
 
     #[test]
     fn session_error_display_contains_relevant_info() {
-        let err = SessionError::UserLimitReached { tier: "free".into(), current: 3, max: 3 };
+        let err = SessionError::UserLimitReached {
+            tier: "free".into(),
+            current: 3,
+            max: 3,
+        };
         let msg = err.to_string();
         assert!(msg.contains("free"), "should mention tier: {msg}");
         assert!(msg.contains("3"), "should mention count: {msg}");
 
-        let err = SessionError::ProtocolMismatch { client_range: "1-2".into(), server_range: "1-2".into() };
+        let err = SessionError::ProtocolMismatch {
+            client_range: "1-2".into(),
+            server_range: "1-2".into(),
+        };
         assert!(err.to_string().contains("1-2"));
 
-        let err = SessionError::AlreadyConnected { role: PeerRole::Host };
+        let err = SessionError::AlreadyConnected {
+            role: PeerRole::Host,
+        };
         assert!(err.to_string().contains("Host"));
 
         // Verify all variants produce non-empty messages
         let all_errors: Vec<SessionError> = vec![
-            SessionError::AtCapacity { current: 10, max: 10 },
-            SessionError::IpLimitReached { ip: "127.0.0.1".parse().unwrap(), current: 5, max: 5 },
+            SessionError::AtCapacity {
+                current: 10,
+                max: 10,
+            },
+            SessionError::IpLimitReached {
+                ip: "127.0.0.1".parse().unwrap(),
+                current: 5,
+                max: 5,
+            },
             SessionError::SessionLocked,
             SessionError::PairingMismatch,
             SessionError::SessionNotFound,
-            SessionError::InvalidResumeToken { role: PeerRole::Client },
+            SessionError::InvalidResumeToken {
+                role: PeerRole::Client,
+            },
             SessionError::PeerOffline,
             SessionError::ChannelFull,
             SessionError::ClientVersionInvalid("bad".into()),
@@ -1072,7 +1127,10 @@ mod tests {
 
     #[test]
     fn session_error_at_capacity_contains_counts() {
-        let err = SessionError::AtCapacity { current: 42, max: 50 };
+        let err = SessionError::AtCapacity {
+            current: 42,
+            max: 50,
+        };
         let msg = err.to_string();
         assert!(msg.contains("42"), "missing current count: {msg}");
         assert!(msg.contains("50"), "missing max count: {msg}");
@@ -1163,9 +1221,21 @@ mod tests {
     fn register_client_joins_existing_session() {
         let state = test_relay_state();
         // Host creates session
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
         // Client joins
-        let resp = state.register(&client_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        let resp = state
+            .register(
+                &client_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
         assert!(!resp.resume_token.is_empty());
         assert!(resp.peer_online); // host is online
     }
@@ -1173,37 +1243,77 @@ mod tests {
     #[test]
     fn register_client_nonexistent_session_fails() {
         let state = test_relay_state();
-        let err = state.register(&client_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap_err();
+        let err = state
+            .register(
+                &client_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap_err();
         assert!(matches!(err, SessionError::SessionNotFound));
     }
 
     #[test]
     fn register_wrong_pairing_code_rejected() {
         let state = test_relay_state();
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
-        let err = state.register(&client_request(TEST_SESSION, "WRONG1-WRONG2-WRONG3"), dummy_sender(), TEST_IP).unwrap_err();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
+        let err = state
+            .register(
+                &client_request(TEST_SESSION, "WRONG1-WRONG2-WRONG3"),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap_err();
         assert!(matches!(err, SessionError::PairingMismatch));
     }
 
     #[test]
     fn register_lockout_after_max_failures() {
         let state = test_relay_state();
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
 
         // Fail MAX_PAIRING_FAILURES times
         for _ in 0..MAX_PAIRING_FAILURES {
-            let _ = state.register(&client_request(TEST_SESSION, "WRONG1-WRONG2-WRONG3"), dummy_sender(), TEST_IP);
+            let _ = state.register(
+                &client_request(TEST_SESSION, "WRONG1-WRONG2-WRONG3"),
+                dummy_sender(),
+                TEST_IP,
+            );
         }
 
         // Even correct code should now be locked
-        let err = state.register(&client_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap_err();
+        let err = state
+            .register(
+                &client_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap_err();
         assert!(matches!(err, SessionError::SessionLocked));
     }
 
     #[test]
     fn register_host_resume_with_valid_token() {
         let state = test_relay_state();
-        let resp1 = state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        let resp1 = state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
 
         // Resume with the same token
         let mut req = host_request(TEST_SESSION, TEST_CODE);
@@ -1215,23 +1325,51 @@ mod tests {
     #[test]
     fn register_host_resume_with_wrong_token_fails() {
         let state = test_relay_state();
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
 
         // Host is connected, so wrong token hits AlreadyConnected (not InvalidResumeToken)
         let mut req = host_request(TEST_SESSION, TEST_CODE);
         req.resume_token = Some("wrong-token".to_string());
         let err = state.register(&req, dummy_sender(), TEST_IP).unwrap_err();
-        assert!(matches!(err, SessionError::AlreadyConnected { role: PeerRole::Host }));
+        assert!(matches!(
+            err,
+            SessionError::AlreadyConnected {
+                role: PeerRole::Host
+            }
+        ));
     }
 
     #[test]
     fn register_host_already_connected_without_resume_fails() {
         let state = test_relay_state();
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
 
         // Second host without resume token
-        let err = state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap_err();
-        assert!(matches!(err, SessionError::AlreadyConnected { role: PeerRole::Host }));
+        let err = state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SessionError::AlreadyConnected {
+                role: PeerRole::Host
+            }
+        ));
     }
 
     #[test]
@@ -1243,14 +1381,33 @@ mod tests {
             100,
             TierLimits::default(),
             Arc::new(AuthState::new("s".to_string(), None, None, None).unwrap()),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Fill to capacity
-        state.register(&host_request("550e8400-e29b-41d4-a716-446655440001", TEST_CODE), dummy_sender(), TEST_IP).unwrap();
-        state.register(&host_request("550e8400-e29b-41d4-a716-446655440002", TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        state
+            .register(
+                &host_request("550e8400-e29b-41d4-a716-446655440001", TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
+        state
+            .register(
+                &host_request("550e8400-e29b-41d4-a716-446655440002", TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
 
         // Third should fail
-        let err = state.register(&host_request("550e8400-e29b-41d4-a716-446655440003", TEST_CODE), dummy_sender(), TEST_IP).unwrap_err();
+        let err = state
+            .register(
+                &host_request("550e8400-e29b-41d4-a716-446655440003", TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap_err();
         assert!(matches!(err, SessionError::AtCapacity { .. }));
     }
 
@@ -1263,10 +1420,23 @@ mod tests {
             1, // max 1 per IP
             TierLimits::default(),
             Arc::new(AuthState::new("s".to_string(), None, None, None).unwrap()),
-        ).unwrap();
+        )
+        .unwrap();
 
-        state.register(&host_request("550e8400-e29b-41d4-a716-446655440001", TEST_CODE), dummy_sender(), TEST_IP).unwrap();
-        let err = state.register(&host_request("550e8400-e29b-41d4-a716-446655440002", TEST_CODE), dummy_sender(), TEST_IP).unwrap_err();
+        state
+            .register(
+                &host_request("550e8400-e29b-41d4-a716-446655440001", TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
+        let err = state
+            .register(
+                &host_request("550e8400-e29b-41d4-a716-446655440002", TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap_err();
         assert!(matches!(err, SessionError::IpLimitReached { .. }));
     }
 
@@ -1286,8 +1456,16 @@ mod tests {
     fn route_to_online_peer() {
         let state = test_relay_state();
         let (client_tx, mut client_rx) = mpsc::channel(16);
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
-        state.register(&client_request(TEST_SESSION, TEST_CODE), client_tx, TEST_IP).unwrap();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
+        state
+            .register(&client_request(TEST_SESSION, TEST_CODE), client_tx, TEST_IP)
+            .unwrap();
 
         let route = RelayRoute {
             session_id: TEST_SESSION.to_string(),
@@ -1303,7 +1481,13 @@ mod tests {
     #[test]
     fn route_to_offline_peer_fails() {
         let state = test_relay_state();
-        state.register(&host_request(TEST_SESSION, TEST_CODE), dummy_sender(), TEST_IP).unwrap();
+        state
+            .register(
+                &host_request(TEST_SESSION, TEST_CODE),
+                dummy_sender(),
+                TEST_IP,
+            )
+            .unwrap();
         // No client registered
 
         let route = RelayRoute {
@@ -1348,7 +1532,8 @@ mod tests {
             100,
             TierLimits { free: 0, pro: 0 },
             Arc::new(AuthState::new("s".to_string(), None, None, None).unwrap()),
-        ).unwrap();
+        )
+        .unwrap();
         // Zero limit = unlimited
         assert!(state.check_user_limit("user-1", "free").is_ok());
     }

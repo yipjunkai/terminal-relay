@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tracing::{debug, warn};
 

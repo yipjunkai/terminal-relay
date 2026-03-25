@@ -15,14 +15,14 @@ use protocol::{
     crypto::{fingerprint, generate_key_pair},
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
     protocol::{
-        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole,
-        RegisterRequest, RelayMessage, RelayRoute, SecureMessage, decode_peer_frame,
+        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole, RegisterRequest, RelayMessage,
+        RelayRoute, SecureMessage, decode_peer_frame,
     },
 };
 
 use crate::common::{
-    ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff,
-    send_handshake, send_peer_frame, shutdown_signal, verify_handshake_confirm,
+    ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff, send_handshake,
+    send_peer_frame, shutdown_signal, verify_handshake_confirm,
 };
 
 /// Identity and key material for the local side of a session (immutable after creation).
@@ -42,6 +42,11 @@ struct HostContext {
     relay_tx: mpsc::Sender<RelayMessage>,
     identity: SessionIdentity,
     tui_state: TuiState,
+    /// In API mode, commands from the mobile client are forwarded here
+    /// instead of being injected into a PTY.
+    command_tx: Option<mpsc::Sender<protocol::protocol::AgentCommand>>,
+    /// In API mode, info needed for takeover (spawning `opencode attach`).
+    api_info: Option<ApiInfo>,
 }
 
 impl HostContext {
@@ -51,16 +56,27 @@ impl HostContext {
             return Ok(());
         };
         let sealed = channel.seal(msg)?;
-        send_peer_frame(&self.relay_tx, &self.identity.session_id, PeerFrame::Secure(sealed))
+        send_peer_frame(
+            &self.relay_tx,
+            &self.identity.session_id,
+            PeerFrame::Secure(sealed),
+        )
     }
 }
 
 use crate::{
-    ai_tools::{resolve_tool, tool_supports_structured},
+    ai_tools::{resolve_tool, tool_supports_api, tool_supports_structured},
+    opencode_adapter::OpenCodeAdapter,
     pty::PtySession,
     relay_client::RelayConnection,
     state::{SessionRecord, SessionStore},
 };
+
+/// Info needed for API-mode takeover (spawning `opencode attach`).
+struct ApiInfo {
+    base_url: String,
+    session_id: String,
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct HostArgs {
@@ -89,10 +105,7 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
     let (tool_name, tool_args) = if args.tool.is_empty() {
         (None, Vec::new())
     } else {
-        (
-            Some(args.tool[0].as_str()),
-            args.tool[1..].to_vec(),
-        )
+        (Some(args.tool[0].as_str()), args.tool[1..].to_vec())
     };
 
     let tool = resolve_tool(tool_name, &tool_args)?;
@@ -115,6 +128,8 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
     #[cfg(not(feature = "hosted"))]
     let api_key: Option<String> = None;
 
+    let use_api_mode = tool_supports_api(&tool.name);
+
     run_single_host_session(HostSessionParams {
         tool_name: tool.name,
         command: tool.command,
@@ -124,6 +139,7 @@ pub async fn run_host_sessions(args: HostArgs, store: SessionStore) -> anyhow::R
         rows,
         cols,
         store,
+        use_api_mode,
     })
     .await
 }
@@ -137,6 +153,8 @@ struct HostSessionParams {
     rows: u16,
     cols: u16,
     store: SessionStore,
+    /// When true, use the OpenCode HTTP/SSE adapter instead of PTY + JSONL.
+    use_api_mode: bool,
 }
 
 async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()> {
@@ -149,6 +167,7 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         rows,
         cols,
         store,
+        use_api_mode: _,
     } = params;
 
     let session_id = new_session_id();
@@ -208,18 +227,58 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         qr,
     );
 
-    // Prevent system idle sleep while the session is active.
-    let _awake = keepawake::Builder::default()
-        .display(false)
-        .idle(true)
-        .reason("farwatch session active")
-        .create();
+    // ── Pre-TUI setup for API mode (session picker needs a clean terminal) ──
+    let mut pty: Option<PtySession> = None;
+    let mut output_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
+    let mut exit_rx: Option<tokio::sync::oneshot::Receiver<i32>> = None;
+    let mut event_rx: Option<mpsc::Receiver<protocol::protocol::AgentEvent>> = None;
+    let mut watcher_log_rx: Option<mpsc::Receiver<String>> = None;
+    let mut command_tx: Option<mpsc::Sender<protocol::protocol::AgentCommand>> = None;
+    let mut api_info: Option<ApiInfo> = None;
+    let mut adapter: Option<OpenCodeAdapter> = None;
+    let mut stream_ended_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
+    let mut pre_tui_logs: Vec<(LogLevel, String)> = Vec::new();
 
-    let mut tui_handle = Tui::new()?;
-    let mut tui_state = tui_state;
-    tui_state.push_log(LogLevel::Info, "Connected to relay");
-    tui_state.push_log(LogLevel::Info, "Session registered");
-    tui_handle.draw(&tui_state)?;
+    if params.use_api_mode {
+        // Start OpenCode server and pick session BEFORE the TUI takes over the
+        // terminal. The interactive session picker needs a clean terminal.
+        eprintln!("  Starting OpenCode server...");
+        let mut oc = OpenCodeAdapter::start(crate::constants::OPENCODE_DEFAULT_PORT).await?;
+        eprintln!("  OpenCode server is healthy");
+        pre_tui_logs.push((LogLevel::Success, "OpenCode server is healthy".to_string()));
+
+        // List existing sessions and let the user pick one (or create new).
+        let sessions = oc.list_sessions().await?;
+        match crate::opencode_adapter::pick_session(&sessions)? {
+            crate::opencode_adapter::SessionChoice::New => {
+                let s = oc.create_session(Some("farwatch session")).await?;
+                pre_tui_logs.push((LogLevel::Info, format!("New session: {}", s.title)));
+            }
+            crate::opencode_adapter::SessionChoice::Existing(s) => {
+                oc.set_session(&s.id);
+                pre_tui_logs.push((LogLevel::Info, format!("Resumed session: {}", s.title)));
+            }
+        }
+
+        api_info = Some(ApiInfo {
+            base_url: oc.base_url().to_string(),
+            session_id: oc.session_id().to_string(),
+        });
+
+        exit_rx = Some(oc.take_exit_rx());
+
+        let channels = oc.subscribe()?;
+        event_rx = Some(channels.event_rx);
+        command_tx = Some(channels.command_tx);
+        watcher_log_rx = Some(channels.log_rx);
+        stream_ended_rx = Some(channels.stream_ended_rx);
+        adapter = Some(oc);
+
+        pre_tui_logs.push((
+            LogLevel::Info,
+            "Subscribed to OpenCode event stream".to_string(),
+        ));
+    }
 
     let identity = SessionIdentity {
         session_id,
@@ -228,24 +287,44 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         local_public: local_key.public,
     };
 
-    // ── Always spawn PTY ──────────────────────────────────────────
-    let (pty, streams) = PtySession::spawn(&command, &args, rows, cols)?;
-    let mut output_rx = streams.output_rx;
-    let mut exit_rx = streams.exit_rx;
+    // Prevent system idle sleep while the session is active.
+    let _awake = keepawake::Builder::default()
+        .display(false)
+        .idle(true)
+        .reason("farwatch session active")
+        .create();
 
-    // For tools with structured support (Claude Code), start a JSONL watcher
-    // that tails the session log and emits AgentEvent alongside PTY output.
-    let mut event_rx: Option<mpsc::Receiver<protocol::protocol::AgentEvent>> = None;
-    let mut watcher_log_rx: Option<mpsc::Receiver<String>> = None;
-    if tool_supports_structured(&identity.tool_name) {
-        tui_state.push_log(LogLevel::Info, "Starting JSONL session watcher");
-        match crate::jsonl_watcher::start_watching() {
-            Ok(watcher) => {
-                event_rx = Some(watcher.event_rx);
-                watcher_log_rx = Some(watcher.log_rx);
-            }
-            Err(err) => {
-                tui_state.push_log(LogLevel::Warning, format!("JSONL watcher failed: {err}"));
+    // ── Start TUI (takes over the terminal) ─────────────────────────
+    let mut tui_handle = Tui::new()?;
+    let mut tui_state = tui_state;
+    tui_state.push_log(LogLevel::Info, "Connected to relay");
+    tui_state.push_log(LogLevel::Info, "Session registered");
+
+    // Replay any pre-TUI log messages.
+    for (level, msg) in pre_tui_logs {
+        tui_state.push_log(level, msg);
+    }
+    tui_handle.draw(&tui_state)?;
+
+    if !params.use_api_mode {
+        // ── PTY mode: spawn process + optional JSONL watcher ──
+        let (p, streams) = PtySession::spawn(&command, &args, rows, cols)?;
+        output_rx = Some(streams.output_rx);
+        exit_rx = Some(streams.exit_rx);
+        pty = Some(p);
+
+        // For tools with structured support (Claude Code), start a JSONL watcher
+        // that tails the session log and emits AgentEvent alongside PTY output.
+        if tool_supports_structured(&identity.tool_name) {
+            tui_state.push_log(LogLevel::Info, "Starting JSONL session watcher");
+            match crate::jsonl_watcher::start_watching() {
+                Ok(watcher) => {
+                    event_rx = Some(watcher.event_rx);
+                    watcher_log_rx = Some(watcher.log_rx);
+                }
+                Err(err) => {
+                    tui_state.push_log(LogLevel::Warning, format!("JSONL watcher failed: {err}"));
+                }
             }
         }
     }
@@ -257,6 +336,8 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
         relay_tx,
         identity,
         tui_state,
+        command_tx,
+        api_info,
     };
     let mut peer_online = registered.peer_online;
 
@@ -273,88 +354,57 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(crate::constants::HEARTBEAT_INTERVAL_SECS));
-    let mut redraw = tokio::time::interval(Duration::from_millis(crate::constants::REDRAW_INTERVAL_MS));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(
+        crate::constants::HEARTBEAT_INTERVAL_SECS,
+    ));
+    let mut redraw =
+        tokio::time::interval(Duration::from_millis(crate::constants::REDRAW_INTERVAL_MS));
 
     loop {
         tokio::select! {
-                // ── PTY output ──
-                output = output_rx.recv() => {
-                    let Some(bytes) = output else { continue; };
-                    let len = bytes.len() as u64;
-                    ctx.scrollback.push(bytes.clone());
-                    if ctx.chan.is_confirmed() {
-                        if let Err(err) = ctx.send_secure(&SecureMessage::PtyOutput(bytes)) {
-                            warn!(error = %err, "failed sending PTY output");
-                        }
-                        ctx.tui_state.bytes_sent += len;
-                    } else {
-                        ctx.output_backlog.push(bytes);
+            // ── PTY output (PTY mode only) ──
+            output = async { output_rx.as_mut().unwrap().recv().await }, if output_rx.is_some() => {
+                let Some(bytes) = output else { continue; };
+                let len = bytes.len() as u64;
+                ctx.scrollback.push(bytes.clone());
+                if ctx.chan.is_confirmed() {
+                    if let Err(err) = ctx.send_secure(&SecureMessage::PtyOutput(bytes)) {
+                        warn!(error = %err, "failed sending PTY output");
                     }
+                    ctx.tui_state.bytes_sent += len;
+                } else {
+                    ctx.output_backlog.push(bytes);
                 }
-                // ── JSONL watcher: agent events (for structured-capable tools) ──
-                agent_event = async { event_rx.as_mut().unwrap().recv().await }, if event_rx.is_some() => {
-                    let Some(evt) = agent_event else { continue; };
-                    if let Err(err) = ctx.send_secure(&SecureMessage::AgentEvent(evt)) {
-                        warn!(error = %err, "failed sending agent event");
+            }
+            // ── Structured agent events (JSONL watcher or OpenCode SSE adapter) ──
+            agent_event = async { event_rx.as_mut().unwrap().recv().await }, if event_rx.is_some() => {
+                let Some(evt) = agent_event else { continue; };
+                if let Err(err) = ctx.send_secure(&SecureMessage::AgentEvent(evt)) {
+                    warn!(error = %err, "failed sending agent event");
+                }
+            }
+            // ── Adapter/watcher log messages → TUI ──
+            log_msg = async { watcher_log_rx.as_mut().unwrap().recv().await }, if watcher_log_rx.is_some() => {
+                if let Some(msg) = log_msg {
+                    ctx.tui_state.push_log(LogLevel::Info, msg);
+                }
+            }
+            // ── Relay inbound messages ──
+            inbound = relay.recv() => {
+                match inbound {
+                    Some(RelayMessage::Route(route)) => {
+                        if route.session_id != ctx.identity.session_id {
+                            continue;
+                        }
+                        let payload_len = route.payload.len() as u64;
+                        handle_route(route, pty.as_ref(), &mut ctx)?;
+                        ctx.tui_state.bytes_received += payload_len;
                     }
-                }
-                // ── JSONL watcher: log messages → TUI ──
-                log_msg = async { watcher_log_rx.as_mut().unwrap().recv().await }, if watcher_log_rx.is_some() => {
-                    if let Some(msg) = log_msg {
-                        ctx.tui_state.push_log(LogLevel::Info, msg);
-                    }
-                }
-                // ── Relay inbound messages ──
-                inbound = relay.recv() => {
-                    match inbound {
-                        Some(RelayMessage::Route(route)) => {
-                            if route.session_id != ctx.identity.session_id {
-                                continue;
-                            }
-                            let payload_len = route.payload.len() as u64;
-                            handle_route(route, &pty, &mut ctx)?;
-                            ctx.tui_state.bytes_received += payload_len;
-                        }
-                        Some(RelayMessage::PeerStatus(status)) => {
-                            if status.role == PeerRole::Client {
-                                peer_online = status.online;
-                                if peer_online {
-                                    ctx.tui_state.push_log(LogLevel::Info, "Client connected");
-                                    send_handshake(
-                                        &ctx.identity.session_id,
-                                        &ctx.relay_tx,
-                                        &ctx.identity.local_public,
-                                        &local_fingerprint,
-                                        Some(ctx.identity.tool_name.clone()),
-                                    )?;
-                                    ctx.tui_state.status = PeerStatus::Handshaking;
-                                } else {
-                                    ctx.tui_state.push_log(LogLevel::Warning, "Client disconnected");
-                                    info!(session_id = %ctx.identity.session_id, "client disconnected, awaiting reconnect");
-                                    ctx.chan.reset();
-                                    ctx.tui_state.status = PeerStatus::WaitingForPeer;
-                                }
-                            }
-                        }
-                        Some(RelayMessage::Error(err)) => {
-                            ctx.tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
-                            warn!(session_id = %ctx.identity.session_id, message = %err.message, "relay reported error");
-                        }
-                        Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
-                        None => {
-                            ctx.tui_state.status = PeerStatus::Disconnected;
-                            ctx.tui_state.push_log(LogLevel::Warning, "Relay disconnected, reconnecting...");
-                            warn!(session_id = %ctx.identity.session_id, "relay disconnected, attempting recovery");
-                            let (new_relay, new_registered) = reconnect_host(&relay_url, &ctx.identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
-                            relay = new_relay;
-                            ctx.relay_tx = relay.sender();
-                            resume_token = new_registered.resume_token.clone();
-                            ctx.chan.reset();
-                            peer_online = new_registered.peer_online;
-                            ctx.tui_state.status = PeerStatus::WaitingForPeer;
-                            ctx.tui_state.push_log(LogLevel::Info, "Reconnected to relay");
+                    Some(RelayMessage::PeerStatus(status)) => {
+                        if status.role == PeerRole::Client {
+                            peer_online = status.online;
                             if peer_online {
+                                ctx.tui_state.push_log(LogLevel::Info, "Client connected");
                                 send_handshake(
                                     &ctx.identity.session_id,
                                     &ctx.relay_tx,
@@ -362,73 +412,156 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
                                     &local_fingerprint,
                                     Some(ctx.identity.tool_name.clone()),
                                 )?;
-                            }
-                        }
-                    }
-                }
-                _ = heartbeat.tick() => {
-                    let _ = ctx.relay_tx.try_send(RelayMessage::Ping(now_millis()));
-                }
-                _ = redraw.tick() => {
-                    match tui_handle.poll_action(Duration::ZERO, &mut ctx.tui_state)? {
-                        TuiAction::Quit => {
-                            ctx.tui_state.push_log(LogLevel::Info, "Shutting down...");
-                            tui_handle.draw(&ctx.tui_state)?;
-                            break;
-                        }
-                        TuiAction::Takeover => {
-                            ctx.tui_state.push_log(LogLevel::Info, "Takeover mode — double-tap Esc to return");
-                            tui_handle.draw(&ctx.tui_state)?;
-
-                            // Suspend TUI and enter takeover loop.
-                            tui_handle.suspend()?;
-                            run_takeover(&pty, &mut output_rx, &mut event_rx, &mut watcher_log_rx, &mut relay, &mut ctx).await?;
-                            tui_handle.resume()?;
-
-                            // Sync TUI status with actual channel state after takeover.
-                            if ctx.chan.is_confirmed() {
-                                ctx.tui_state.status = PeerStatus::Secure;
-                            } else if ctx.chan.has_channel() {
                                 ctx.tui_state.status = PeerStatus::Handshaking;
+                            } else {
+                                ctx.tui_state.push_log(LogLevel::Warning, "Client disconnected");
+                                info!(session_id = %ctx.identity.session_id, "client disconnected, awaiting reconnect");
+                                ctx.chan.reset();
+                                ctx.tui_state.status = PeerStatus::WaitingForPeer;
                             }
-                            // Disconnected/WaitingForPeer already set by takeover loop if needed.
-
-                            ctx.tui_state.push_log(LogLevel::Info, "Returned to dashboard");
                         }
-                        TuiAction::CopyUri => {
-                            tui::copy_to_clipboard(&ctx.tui_state.info.pairing_uri);
-                            ctx.tui_state.push_log(LogLevel::Info, "Pairing URI copied to clipboard");
-                        }
-                        TuiAction::None => {}
                     }
-                    tui_handle.draw(&ctx.tui_state)?;
-                }
-                exit_code = &mut exit_rx => {
-                    let code = exit_code.unwrap_or(1);
-                    ctx.tui_state.push_log(LogLevel::Info, format!("Process exited (code {code})"));
-                    info!(session_id = %ctx.identity.session_id, code = code, "PTY process exited");
-                    let _ = ctx.send_secure(&SecureMessage::SessionEnded { exit_code: code });
-                    tui_handle.draw(&ctx.tui_state)?;
-                    sleep(Duration::from_secs(1)).await;
-                    break;
-                }
-                _ = &mut shutdown => {
-                    ctx.tui_state.push_log(LogLevel::Info, "Received shutdown signal");
-                    info!(session_id = %ctx.identity.session_id, "received shutdown signal, stopping host session");
-                    tui_handle.draw(&ctx.tui_state)?;
-                    break;
+                    Some(RelayMessage::Error(err)) => {
+                        ctx.tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
+                        warn!(session_id = %ctx.identity.session_id, message = %err.message, "relay reported error");
+                    }
+                    Some(RelayMessage::Pong(_)) | Some(RelayMessage::Ping(_)) | Some(RelayMessage::Registered(_)) | Some(RelayMessage::Register(_)) => {}
+                    None => {
+                        ctx.tui_state.status = PeerStatus::Disconnected;
+                        ctx.tui_state.push_log(LogLevel::Warning, "Relay disconnected, reconnecting...");
+                        warn!(session_id = %ctx.identity.session_id, "relay disconnected, attempting recovery");
+                        let (new_relay, new_registered) = reconnect_host(&relay_url, &ctx.identity.session_id, &pairing_code, &resume_token, api_key.as_deref()).await?;
+                        relay = new_relay;
+                        ctx.relay_tx = relay.sender();
+                        resume_token = new_registered.resume_token.clone();
+                        ctx.chan.reset();
+                        peer_online = new_registered.peer_online;
+                        ctx.tui_state.status = PeerStatus::WaitingForPeer;
+                        ctx.tui_state.push_log(LogLevel::Info, "Reconnected to relay");
+                        if peer_online {
+                            send_handshake(
+                                &ctx.identity.session_id,
+                                &ctx.relay_tx,
+                                &ctx.identity.local_public,
+                                &local_fingerprint,
+                                Some(ctx.identity.tool_name.clone()),
+                            )?;
+                        }
+                    }
                 }
             }
+            _ = heartbeat.tick() => {
+                let _ = ctx.relay_tx.try_send(RelayMessage::Ping(now_millis()));
+            }
+            _ = redraw.tick() => {
+                match tui_handle.poll_action(Duration::ZERO, &mut ctx.tui_state)? {
+                    TuiAction::Quit => {
+                        ctx.tui_state.push_log(LogLevel::Info, "Shutting down...");
+                        tui_handle.draw(&ctx.tui_state)?;
+                        break;
+                    }
+                    TuiAction::Takeover => {
+                        ctx.tui_state.push_log(LogLevel::Info, "Takeover mode — double-tap Esc to return");
+                        tui_handle.draw(&ctx.tui_state)?;
+
+                        // Suspend TUI and enter takeover loop.
+                        tui_handle.suspend()?;
+                        let mut should_exit = false;
+                        if ctx.api_info.is_some() {
+                            // API mode: spawn `opencode attach` for native TUI.
+                            // Clone the info to avoid borrow conflict with ctx.
+                            let info = ApiInfo {
+                                base_url: ctx.api_info.as_ref().unwrap().base_url.clone(),
+                                session_id: ctx.api_info.as_ref().unwrap().session_id.clone(),
+                            };
+                            let exit = run_takeover_api(&info, &mut event_rx, &mut watcher_log_rx, &mut relay, &mut ctx, &mut stream_ended_rx).await?;
+                            match exit {
+                                TakeoverApiExit::UserEscaped => {}
+                                TakeoverApiExit::SessionEnded(code) => {
+                                    info!(code, "opencode attach exited, shutting down");
+                                    should_exit = true;
+                                }
+                                TakeoverApiExit::StreamEnded => {
+                                    should_exit = true;
+                                }
+                                TakeoverApiExit::RelayDisconnected => {
+                                    should_exit = true;
+                                }
+                            }
+                        } else if let Some(ref pty_session) = pty {
+                            // PTY mode: direct PTY takeover.
+                            run_takeover(pty_session, output_rx.as_mut().unwrap(), &mut event_rx, &mut watcher_log_rx, &mut relay, &mut ctx).await?;
+                        }
+                        tui_handle.resume()?;
+
+                        if should_exit {
+                            ctx.tui_state.push_log(LogLevel::Info, "OpenCode session ended");
+                            let _ = ctx.send_secure(&SecureMessage::SessionEnded { exit_code: 0 });
+                            tui_handle.draw(&ctx.tui_state)?;
+                            sleep(Duration::from_secs(1)).await;
+                            break;
+                        }
+
+                        // Sync TUI status with actual channel state after takeover.
+                        if ctx.chan.is_confirmed() {
+                            ctx.tui_state.status = PeerStatus::Secure;
+                        } else if ctx.chan.has_channel() {
+                            ctx.tui_state.status = PeerStatus::Handshaking;
+                        }
+                        // Disconnected/WaitingForPeer already set by takeover loop if needed.
+
+                        ctx.tui_state.push_log(LogLevel::Info, "Returned to dashboard");
+                    }
+                    TuiAction::CopyUri => {
+                        tui::copy_to_clipboard(&ctx.tui_state.info.pairing_uri);
+                        ctx.tui_state.push_log(LogLevel::Info, "Pairing URI copied to clipboard");
+                    }
+                    TuiAction::None => {}
+                }
+                tui_handle.draw(&ctx.tui_state)?;
+            }
+            exit_code = async { exit_rx.as_mut().unwrap().await }, if exit_rx.is_some() => {
+                let code = exit_code.unwrap_or(1);
+                ctx.tui_state.push_log(LogLevel::Info, format!("Process exited (code {code})"));
+                info!(session_id = %ctx.identity.session_id, code = code, "PTY process exited");
+                let _ = ctx.send_secure(&SecureMessage::SessionEnded { exit_code: code });
+                tui_handle.draw(&ctx.tui_state)?;
+                sleep(Duration::from_secs(1)).await;
+                break;
+            }
+            // ── OpenCode SSE stream closed (e.g. user ran /exit) ──
+            _ = async { stream_ended_rx.as_mut().unwrap().await }, if stream_ended_rx.is_some() => {
+                ctx.tui_state.push_log(LogLevel::Info, "OpenCode session ended");
+                info!(session_id = %ctx.identity.session_id, "SSE stream closed, shutting down");
+                let _ = ctx.send_secure(&SecureMessage::SessionEnded { exit_code: 0 });
+                tui_handle.draw(&ctx.tui_state)?;
+                sleep(Duration::from_secs(1)).await;
+                break;
+            }
+            _ = &mut shutdown => {
+                ctx.tui_state.push_log(LogLevel::Info, "Received shutdown signal");
+                info!(session_id = %ctx.identity.session_id, "received shutdown signal, stopping host session");
+                tui_handle.draw(&ctx.tui_state)?;
+                break;
+            }
         }
+    }
+
+    // Clean up OpenCode server if we started one.
+    if let Some(mut oc) = adapter {
+        ctx.tui_state
+            .push_log(LogLevel::Info, "Shutting down OpenCode server...");
+        tui_handle.draw(&ctx.tui_state)?;
+        oc.shutdown().await;
+    }
+
     // Terminal restored automatically by Tui::Drop.
     Ok(())
 }
 
-
-
 fn handle_route(
     route: RelayRoute,
-    pty: &PtySession,
+    pty: Option<&PtySession>,
     ctx: &mut HostContext,
 ) -> anyhow::Result<()> {
     let frame = decode_peer_frame(&route.payload)?;
@@ -449,7 +582,10 @@ fn handle_route(
                 return Ok(()); // Duplicate or stale — ignored
             };
 
-            ctx.tui_state.push_log(LogLevel::Info, format!("Peer fingerprint: {}", handshake.fingerprint));
+            ctx.tui_state.push_log(
+                LogLevel::Info,
+                format!("Peer fingerprint: {}", handshake.fingerprint),
+            );
             info!(
                 session_id = %ctx.identity.session_id,
                 peer_fingerprint = %handshake.fingerprint,
@@ -466,7 +602,8 @@ fn handle_route(
             }
 
             ctx.tui_state.status = PeerStatus::Secure;
-            ctx.tui_state.push_log(LogLevel::Success, "E2E encryption established");
+            ctx.tui_state
+                .push_log(LogLevel::Success, "E2E encryption established");
             info!(session_id = %ctx.identity.session_id, "handshake confirmed, channel trusted");
             ctx.chan.confirm();
 
@@ -496,10 +633,24 @@ fn handle_route(
                 ctx.send_secure(&SecureMessage::PtyOutput(bytes))?;
             }
 
-            ctx.send_secure(&SecureMessage::Notification(protocol::protocol::PushNotification {
-                title: format!("Connected to {}", ctx.identity.tool_name),
-                body: "Session encryption established".to_string(),
-            }))?;
+            ctx.send_secure(&SecureMessage::Notification(
+                protocol::protocol::PushNotification {
+                    title: format!("Connected to {}", ctx.identity.tool_name),
+                    body: "Session encryption established".to_string(),
+                },
+            ))?;
+
+            // In API mode, send a synthetic SessionInit so the mobile app
+            // immediately switches to structured view (no PTY output to display).
+            if ctx.api_info.is_some() {
+                ctx.send_secure(&SecureMessage::AgentEvent(
+                    protocol::protocol::AgentEvent::SessionInit {
+                        session_id: ctx.identity.session_id.clone(),
+                        model: "opencode".to_string(),
+                        tools: vec![],
+                    },
+                ))?;
+            }
         }
         PeerFrame::Secure(sealed) => {
             let Some(channel) = ctx.chan.confirmed_channel() else {
@@ -508,28 +659,44 @@ fn handle_route(
             let message = channel.open(&sealed)?;
             match message {
                 SecureMessage::PtyInput(bytes) => {
-                    pty.send_input(bytes)?;
+                    if let Some(pty) = pty {
+                        pty.send_input(bytes)?;
+                    }
                 }
                 SecureMessage::Resize { cols, rows } => {
-                    pty.resize(cols, rows)?;
+                    if let Some(pty) = pty {
+                        pty.resize(cols, rows)?;
+                    }
                 }
                 SecureMessage::VoiceCommand(action) => {
-                    pty.send_input(action.transcript.into_bytes())?;
+                    if let Some(ref cmd_tx) = ctx.command_tx {
+                        // API mode: send as a structured prompt.
+                        let _ = cmd_tx.try_send(protocol::protocol::AgentCommand::Prompt {
+                            text: action.transcript,
+                        });
+                    } else if let Some(pty) = pty {
+                        pty.send_input(action.transcript.into_bytes())?;
+                    }
                 }
                 SecureMessage::AgentCommand(cmd) => {
-                    match cmd {
-                        protocol::protocol::AgentCommand::Prompt { text } => {
-                            // Inject the prompt into the PTY as keystrokes.
-                            // Use \r (carriage return) not \n — PTY Enter is \r.
-                            pty.send_input(format!("{text}\r").into_bytes())?;
-                        }
-                        protocol::protocol::AgentCommand::ApproveToolUse { .. } => {
-                            // Inject 'y' + Enter into the PTY to approve.
-                            pty.send_input(b"y\r".to_vec())?;
-                        }
-                        protocol::protocol::AgentCommand::DenyToolUse { .. } => {
-                            // Inject 'n' + Enter into the PTY to deny.
-                            pty.send_input(b"n\r".to_vec())?;
+                    if let Some(ref cmd_tx) = ctx.command_tx {
+                        // API mode: forward the command to the adapter for HTTP dispatch.
+                        let _ = cmd_tx.try_send(cmd);
+                    } else if let Some(pty) = pty {
+                        // PTY mode: inject into the PTY as keystrokes.
+                        match cmd {
+                            protocol::protocol::AgentCommand::Prompt { text } => {
+                                pty.send_input(format!("{text}\r").into_bytes())?;
+                            }
+                            protocol::protocol::AgentCommand::ApproveToolUse { .. } => {
+                                pty.send_input(b"y\r".to_vec())?;
+                            }
+                            protocol::protocol::AgentCommand::DenyToolUse { .. } => {
+                                pty.send_input(b"n\r".to_vec())?;
+                            }
+                            protocol::protocol::AgentCommand::AbortSession => {
+                                pty.send_input(vec![0x03])?;
+                            }
                         }
                     }
                 }
@@ -549,7 +716,7 @@ fn handle_route(
     Ok(())
 }
 
-/// Takeover mode: the desktop user directly interacts with the PTY.
+/// Takeover mode (PTY): the desktop user directly interacts with the PTY.
 ///
 /// The TUI is suspended. PTY output goes to stdout (so the user sees Claude
 /// Code's real TUI). Keyboard input goes to the PTY. The relay still receives
@@ -562,7 +729,7 @@ async fn run_takeover(
     relay: &mut RelayConnection,
     ctx: &mut HostContext,
 ) -> anyhow::Result<()> {
-    use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use tokio::io::{AsyncWriteExt, stdout};
 
     // Enter raw mode for direct keyboard passthrough.
@@ -580,8 +747,6 @@ async fn run_takeover(
     }
     let _ = pty.send_input(vec![0x0c]); // Ctrl+L
 
-
-
     // Spawn a blocking task to read stdin keypresses and resize events.
     enum TakeoverInput {
         Key(Vec<u8>),
@@ -589,7 +754,7 @@ async fn run_takeover(
     }
     let (key_tx, mut key_rx) = mpsc::channel::<TakeoverInput>(64);
     let stdin_task = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+        use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
         use std::time::Instant;
 
         let mut last_esc: Option<Instant> = None;
@@ -598,66 +763,92 @@ async fn run_takeover(
         loop {
             if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                 match event::read() {
-                Ok(Event::Resize(cols, rows)) => {
-                    if key_tx.blocking_send(TakeoverInput::Resize(cols, rows)).is_err() {
-                        break;
-                    }
-                }
-                Ok(Event::Key(key)) => {
-                    // Double-tap Esc = exit takeover.
-                    if key.code == KeyCode::Esc {
-                        if let Some(prev) = last_esc {
-                            if prev.elapsed().as_millis() < double_tap_ms {
-                                break;
-                            }
-                        }
-                        last_esc = Some(Instant::now());
-                        // Still send the first Esc to the PTY.
-                        if key_tx.blocking_send(TakeoverInput::Key(vec![0x1b])).is_err() {
+                    Ok(Event::Resize(cols, rows)) => {
+                        if key_tx
+                            .blocking_send(TakeoverInput::Resize(cols, rows))
+                            .is_err()
+                        {
                             break;
                         }
-                        continue;
                     }
-                    last_esc = None;
-
-                    // Convert key event to bytes for the PTY.
-                    let bytes = match key.code {
-                        KeyCode::Char(c) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                // Ctrl+letter → ASCII control code.
-                                let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
-                                vec![ctrl]
-                            } else {
-                                let mut buf = [0u8; 4];
-                                let s = c.encode_utf8(&mut buf);
-                                s.as_bytes().to_vec()
+                    Ok(Event::Key(key)) => {
+                        // Double-tap Esc = exit takeover.
+                        if key.code == KeyCode::Esc {
+                            if let Some(prev) = last_esc
+                                && prev.elapsed().as_millis() < double_tap_ms
+                            {
+                                break;
                             }
+                            last_esc = Some(Instant::now());
+                            // Still send the first Esc to the PTY.
+                            if key_tx
+                                .blocking_send(TakeoverInput::Key(vec![0x1b]))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
                         }
-                        KeyCode::Enter => vec![b'\r'],
-                        KeyCode::Backspace => vec![0x7f],
-                        KeyCode::Tab => vec![b'\t'],
-                        KeyCode::Up => b"\x1b[A".to_vec(),
-                        KeyCode::Down => b"\x1b[B".to_vec(),
-                        KeyCode::Right => b"\x1b[C".to_vec(),
-                        KeyCode::Left => b"\x1b[D".to_vec(),
-                        KeyCode::Home => b"\x1b[H".to_vec(),
-                        KeyCode::End => b"\x1b[F".to_vec(),
-                        KeyCode::Delete => b"\x1b[3~".to_vec(),
-                        _ => continue,
-                    };
+                        last_esc = None;
 
-                    if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
-                        break;
+                        // Convert key event to bytes for the PTY.
+                        let bytes = match key.code {
+                            KeyCode::Char(c) => {
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    // Ctrl+letter → ASCII control code.
+                                    let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
+                                    vec![ctrl]
+                                } else {
+                                    let mut buf = [0u8; 4];
+                                    let s = c.encode_utf8(&mut buf);
+                                    s.as_bytes().to_vec()
+                                }
+                            }
+                            KeyCode::Enter => vec![b'\r'],
+                            KeyCode::Backspace => vec![0x7f],
+                            KeyCode::Tab => vec![b'\t'],
+                            KeyCode::Up => b"\x1b[A".to_vec(),
+                            KeyCode::Down => b"\x1b[B".to_vec(),
+                            KeyCode::Right => b"\x1b[C".to_vec(),
+                            KeyCode::Left => b"\x1b[D".to_vec(),
+                            KeyCode::Home => b"\x1b[H".to_vec(),
+                            KeyCode::End => b"\x1b[F".to_vec(),
+                            KeyCode::Delete => b"\x1b[3~".to_vec(),
+                            _ => continue,
+                        };
+
+                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
+                            break;
+                        }
                     }
-                }
-                _ => {}
+                    Ok(Event::Mouse(mouse)) => {
+                        // Forward mouse events as SGR escape sequences so TUI
+                        // apps (OpenCode, etc.) can handle scroll natively.
+                        let bytes = match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                format!("\x1b[<64;{};{}M", mouse.column + 1, mouse.row + 1)
+                                    .into_bytes()
+                            }
+                            MouseEventKind::ScrollDown => {
+                                format!("\x1b[<65;{};{}M", mouse.column + 1, mouse.row + 1)
+                                    .into_bytes()
+                            }
+                            _ => continue,
+                        };
+                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     });
 
     // Main takeover loop: PTY I/O + relay + watcher + heartbeat.
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(crate::constants::HEARTBEAT_INTERVAL_SECS));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(
+        crate::constants::HEARTBEAT_INTERVAL_SECS,
+    ));
     loop {
         tokio::select! {
             // ── PTY output → host stdout + scrollback + relay ──
@@ -696,7 +887,7 @@ async fn run_takeover(
                 match inbound {
                     Some(RelayMessage::Route(route)) => {
                         if route.session_id == ctx.identity.session_id {
-                            let _ = handle_route(route, pty, ctx);
+                            let _ = handle_route(route, Some(pty), ctx);
                         }
                     }
                     Some(RelayMessage::PeerStatus(status)) => {
@@ -729,9 +920,253 @@ async fn run_takeover(
     stdin_task.abort();
     disable_raw_mode()?;
 
-
-
     Ok(())
+}
+
+/// Takeover mode (API): spawn `opencode attach` in a PTY for native OpenCode TUI.
+///
+/// The TUI is suspended. `opencode attach` runs inside a farwatch-owned PTY so
+/// that keyboard input can be intercepted for double-tap Esc detection (same as
+/// the PTY takeover). The SSE event stream continues flowing to the phone in the
+/// background. Double-tap Esc kills the attach process and returns to the dashboard.
+/// Why the API takeover loop exited.
+enum TakeoverApiExit {
+    /// User double-tapped Esc to return to the dashboard.
+    UserEscaped,
+    /// The `opencode attach` process exited (user ran `/exit`, Ctrl+C, etc.).
+    SessionEnded(i32),
+    /// The SSE event stream closed (server-side session end).
+    StreamEnded,
+    /// Relay disconnected during takeover.
+    RelayDisconnected,
+}
+
+async fn run_takeover_api(
+    info: &ApiInfo,
+    event_rx: &mut Option<mpsc::Receiver<protocol::protocol::AgentEvent>>,
+    watcher_log_rx: &mut Option<mpsc::Receiver<String>>,
+    relay: &mut RelayConnection,
+    ctx: &mut HostContext,
+    stream_ended_rx: &mut Option<tokio::sync::oneshot::Receiver<()>>,
+) -> anyhow::Result<TakeoverApiExit> {
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    use tokio::io::{AsyncWriteExt, stdout};
+
+    // Spawn `opencode attach` in a PTY so we own the terminal I/O.
+    let (rows, cols) = initial_size();
+    let (attach_pty, attach_streams) = PtySession::spawn(
+        "opencode",
+        &[
+            "attach".to_string(),
+            info.base_url.clone(),
+            "--session".to_string(),
+            info.session_id.clone(),
+        ],
+        rows,
+        cols,
+    )?;
+    let mut attach_output_rx = attach_streams.output_rx;
+    let mut attach_exit_rx = attach_streams.exit_rx;
+
+    // Enter raw mode for direct keyboard passthrough.
+    enable_raw_mode()?;
+    let mut out = stdout();
+
+    // Trigger redraw: resize + Ctrl-L.
+    if let Ok((cols, rows)) = crossterm::terminal::size() {
+        let _ = attach_pty.resize(cols.saturating_sub(1).max(1), rows);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = attach_pty.resize(cols, rows);
+    }
+    let _ = attach_pty.send_input(vec![0x0c]); // Ctrl+L
+
+    // Spawn keyboard reader (same pattern as PTY takeover).
+    enum TakeoverInput {
+        Key(Vec<u8>),
+        Resize(u16, u16),
+    }
+    let (key_tx, mut key_rx) = mpsc::channel::<TakeoverInput>(64);
+    let stdin_task = tokio::task::spawn_blocking(move || {
+        use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+        use std::time::Instant;
+
+        let mut last_esc: Option<Instant> = None;
+        let double_tap_ms = crate::constants::DOUBLE_TAP_ESC_MS;
+
+        loop {
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                match event::read() {
+                    Ok(Event::Resize(cols, rows)) => {
+                        if key_tx
+                            .blocking_send(TakeoverInput::Resize(cols, rows))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Event::Key(key)) => {
+                        // Double-tap Esc = exit takeover.
+                        if key.code == KeyCode::Esc {
+                            if let Some(prev) = last_esc
+                                && prev.elapsed().as_millis() < double_tap_ms
+                            {
+                                break;
+                            }
+                            last_esc = Some(Instant::now());
+                            if key_tx
+                                .blocking_send(TakeoverInput::Key(vec![0x1b]))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                        last_esc = None;
+
+                        let bytes = match key.code {
+                            KeyCode::Char(c) => {
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
+                                    vec![ctrl]
+                                } else {
+                                    let mut buf = [0u8; 4];
+                                    let s = c.encode_utf8(&mut buf);
+                                    s.as_bytes().to_vec()
+                                }
+                            }
+                            KeyCode::Enter => vec![b'\r'],
+                            KeyCode::Backspace => vec![0x7f],
+                            KeyCode::Tab => vec![b'\t'],
+                            KeyCode::Up => b"\x1b[A".to_vec(),
+                            KeyCode::Down => b"\x1b[B".to_vec(),
+                            KeyCode::Right => b"\x1b[C".to_vec(),
+                            KeyCode::Left => b"\x1b[D".to_vec(),
+                            KeyCode::Home => b"\x1b[H".to_vec(),
+                            KeyCode::End => b"\x1b[F".to_vec(),
+                            KeyCode::Delete => b"\x1b[3~".to_vec(),
+                            _ => continue,
+                        };
+
+                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Mouse(mouse)) => {
+                        // Forward mouse events as SGR escape sequences so TUI
+                        // apps (OpenCode, etc.) can handle scroll natively.
+                        let bytes = match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                format!("\x1b[<64;{};{}M", mouse.column + 1, mouse.row + 1)
+                                    .into_bytes()
+                            }
+                            MouseEventKind::ScrollDown => {
+                                format!("\x1b[<65;{};{}M", mouse.column + 1, mouse.row + 1)
+                                    .into_bytes()
+                            }
+                            _ => continue,
+                        };
+                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    // Main loop: PTY I/O + keyboard + SSE events + relay + heartbeat.
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(
+        crate::constants::HEARTBEAT_INTERVAL_SECS,
+    ));
+    let exit_reason;
+    loop {
+        tokio::select! {
+            // ── Attach PTY output → host stdout (user sees the TUI) ──
+            output = attach_output_rx.recv() => {
+                let Some(bytes) = output else {
+                    exit_reason = TakeoverApiExit::SessionEnded(0);
+                    break;
+                };
+                out.write_all(&bytes).await?;
+                out.flush().await?;
+                // Note: we do NOT send this to the relay — the phone gets structured
+                // events via SSE, not raw terminal output from `opencode attach`.
+            }
+            // ── Keyboard + resize → attach PTY ──
+            input = key_rx.recv() => {
+                match input {
+                    Some(TakeoverInput::Key(bytes)) => {
+                        attach_pty.send_input(bytes)?;
+                    }
+                    Some(TakeoverInput::Resize(cols, rows)) => {
+                        let _ = attach_pty.resize(cols, rows);
+                    }
+                    None => {
+                        exit_reason = TakeoverApiExit::UserEscaped;
+                        break;
+                    }
+                }
+            }
+            // ── SSE agent events → relay (phone stays in sync) ──
+            agent_event = async { event_rx.as_mut().unwrap().recv().await }, if event_rx.is_some() => {
+                let Some(evt) = agent_event else { continue; };
+                let _ = ctx.send_secure(&SecureMessage::AgentEvent(evt));
+            }
+            // ── Adapter log (ignored during takeover) ──
+            _log = async { watcher_log_rx.as_mut().unwrap().recv().await }, if watcher_log_rx.is_some() => {}
+            // ── Relay inbound (phone messages + status) ──
+            inbound = relay.recv() => {
+                match inbound {
+                    Some(RelayMessage::Route(route)) => {
+                        if route.session_id == ctx.identity.session_id {
+                            let _ = handle_route(route, None, ctx);
+                        }
+                    }
+                    Some(RelayMessage::PeerStatus(status)) => {
+                        if status.role == PeerRole::Client && !status.online {
+                            ctx.chan.reset();
+                            ctx.tui_state.status = PeerStatus::WaitingForPeer;
+                            ctx.tui_state.push_log(LogLevel::Warning, "Client disconnected during takeover");
+                        }
+                    }
+                    Some(RelayMessage::Error(err)) => {
+                        ctx.tui_state.push_log(LogLevel::Error, format!("Relay error: {}", err.message));
+                    }
+                    None => {
+                        ctx.tui_state.status = PeerStatus::Disconnected;
+                        ctx.tui_state.push_log(LogLevel::Warning, "Relay disconnected during takeover");
+                        exit_reason = TakeoverApiExit::RelayDisconnected;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            // ── Attach process exited (user quit opencode TUI normally) ──
+            exit_code = &mut attach_exit_rx => {
+                let code = exit_code.unwrap_or(1);
+                ctx.tui_state.push_log(LogLevel::Info, format!("OpenCode TUI exited (code {code})"));
+                exit_reason = TakeoverApiExit::SessionEnded(code);
+                break;
+            }
+            // ── SSE stream closed (OpenCode session ended server-side) ──
+            _ = async { stream_ended_rx.as_mut().unwrap().await }, if stream_ended_rx.is_some() => {
+                ctx.tui_state.push_log(LogLevel::Info, "OpenCode session ended");
+                exit_reason = TakeoverApiExit::StreamEnded;
+                break;
+            }
+            // ── Heartbeat ──
+            _ = heartbeat.tick() => {
+                let _ = ctx.relay_tx.try_send(RelayMessage::Ping(now_millis()));
+            }
+        }
+    }
+
+    // Clean up.
+    stdin_task.abort();
+    disable_raw_mode()?;
+
+    Ok(exit_reason)
 }
 
 async fn connect_host(
