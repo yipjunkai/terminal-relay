@@ -753,8 +753,12 @@ async fn run_takeover(
         Resize(u16, u16),
     }
     let (key_tx, mut key_rx) = mpsc::channel::<TakeoverInput>(64);
+    // Enable mouse capture so TUI apps (OpenCode, etc.) that request
+    // mouse mode via DECSET actually receive mouse events.
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+
     let stdin_task = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+        use crossterm::event::{self, Event, KeyCode};
         use std::time::Instant;
 
         let mut last_esc: Option<Instant> = None;
@@ -792,29 +796,8 @@ async fn run_takeover(
                         last_esc = None;
 
                         // Convert key event to bytes for the PTY.
-                        let bytes = match key.code {
-                            KeyCode::Char(c) => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    // Ctrl+letter → ASCII control code.
-                                    let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
-                                    vec![ctrl]
-                                } else {
-                                    let mut buf = [0u8; 4];
-                                    let s = c.encode_utf8(&mut buf);
-                                    s.as_bytes().to_vec()
-                                }
-                            }
-                            KeyCode::Enter => vec![b'\r'],
-                            KeyCode::Backspace => vec![0x7f],
-                            KeyCode::Tab => vec![b'\t'],
-                            KeyCode::Up => b"\x1b[A".to_vec(),
-                            KeyCode::Down => b"\x1b[B".to_vec(),
-                            KeyCode::Right => b"\x1b[C".to_vec(),
-                            KeyCode::Left => b"\x1b[D".to_vec(),
-                            KeyCode::Home => b"\x1b[H".to_vec(),
-                            KeyCode::End => b"\x1b[F".to_vec(),
-                            KeyCode::Delete => b"\x1b[3~".to_vec(),
-                            _ => continue,
+                        let Some(bytes) = crate::input::key_to_bytes(&key) else {
+                            continue;
                         };
 
                         if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
@@ -822,18 +805,10 @@ async fn run_takeover(
                         }
                     }
                     Ok(Event::Mouse(mouse)) => {
-                        // Forward mouse events as SGR escape sequences so TUI
-                        // apps (OpenCode, etc.) can handle scroll natively.
-                        let bytes = match mouse.kind {
-                            MouseEventKind::ScrollUp => {
-                                format!("\x1b[<64;{};{}M", mouse.column + 1, mouse.row + 1)
-                                    .into_bytes()
-                            }
-                            MouseEventKind::ScrollDown => {
-                                format!("\x1b[<65;{};{}M", mouse.column + 1, mouse.row + 1)
-                                    .into_bytes()
-                            }
-                            _ => continue,
+                        // Forward all mouse events as SGR escape sequences so
+                        // TUI apps (OpenCode, etc.) can handle them natively.
+                        let Some(bytes) = crate::input::mouse_to_bytes(&mouse) else {
+                            continue;
                         };
                         if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
                             break;
@@ -916,8 +891,9 @@ async fn run_takeover(
         }
     }
 
-    // Clean up: abort stdin task, restore terminal, notify phone.
+    // Clean up: abort stdin task, disable mouse capture, restore terminal.
     stdin_task.abort();
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
     disable_raw_mode()?;
 
     Ok(())
@@ -970,6 +946,10 @@ async fn run_takeover_api(
 
     // Enter raw mode for direct keyboard passthrough.
     enable_raw_mode()?;
+
+    // Enable mouse capture so TUI apps receive mouse events.
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+
     let mut out = stdout();
 
     // Trigger redraw: resize + Ctrl-L.
@@ -987,7 +967,7 @@ async fn run_takeover_api(
     }
     let (key_tx, mut key_rx) = mpsc::channel::<TakeoverInput>(64);
     let stdin_task = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+        use crossterm::event::{self, Event, KeyCode};
         use std::time::Instant;
 
         let mut last_esc: Option<Instant> = None;
@@ -1023,28 +1003,8 @@ async fn run_takeover_api(
                         }
                         last_esc = None;
 
-                        let bytes = match key.code {
-                            KeyCode::Char(c) => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
-                                    vec![ctrl]
-                                } else {
-                                    let mut buf = [0u8; 4];
-                                    let s = c.encode_utf8(&mut buf);
-                                    s.as_bytes().to_vec()
-                                }
-                            }
-                            KeyCode::Enter => vec![b'\r'],
-                            KeyCode::Backspace => vec![0x7f],
-                            KeyCode::Tab => vec![b'\t'],
-                            KeyCode::Up => b"\x1b[A".to_vec(),
-                            KeyCode::Down => b"\x1b[B".to_vec(),
-                            KeyCode::Right => b"\x1b[C".to_vec(),
-                            KeyCode::Left => b"\x1b[D".to_vec(),
-                            KeyCode::Home => b"\x1b[H".to_vec(),
-                            KeyCode::End => b"\x1b[F".to_vec(),
-                            KeyCode::Delete => b"\x1b[3~".to_vec(),
-                            _ => continue,
+                        let Some(bytes) = crate::input::key_to_bytes(&key) else {
+                            continue;
                         };
 
                         if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
@@ -1052,18 +1012,10 @@ async fn run_takeover_api(
                         }
                     }
                     Ok(Event::Mouse(mouse)) => {
-                        // Forward mouse events as SGR escape sequences so TUI
-                        // apps (OpenCode, etc.) can handle scroll natively.
-                        let bytes = match mouse.kind {
-                            MouseEventKind::ScrollUp => {
-                                format!("\x1b[<64;{};{}M", mouse.column + 1, mouse.row + 1)
-                                    .into_bytes()
-                            }
-                            MouseEventKind::ScrollDown => {
-                                format!("\x1b[<65;{};{}M", mouse.column + 1, mouse.row + 1)
-                                    .into_bytes()
-                            }
-                            _ => continue,
+                        // Forward all mouse events as SGR escape sequences so
+                        // TUI apps (OpenCode, etc.) can handle them natively.
+                        let Some(bytes) = crate::input::mouse_to_bytes(&mouse) else {
+                            continue;
                         };
                         if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
                             break;
@@ -1162,8 +1114,9 @@ async fn run_takeover_api(
         }
     }
 
-    // Clean up.
+    // Clean up: disable mouse capture, abort stdin task, restore terminal.
     stdin_task.abort();
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
     disable_raw_mode()?;
 
     Ok(exit_reason)

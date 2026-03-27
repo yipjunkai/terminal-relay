@@ -6,6 +6,7 @@ mod common;
 mod config;
 mod constants;
 mod host;
+mod input;
 mod jsonl_watcher;
 mod opencode_adapter;
 mod pty;

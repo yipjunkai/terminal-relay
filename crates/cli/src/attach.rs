@@ -22,11 +22,8 @@ use crate::common::{
 };
 use crate::relay_client::RelayConnection;
 
-/// Channel capacity for stdin input chunks.
+/// Channel capacity for input events (keyboard, mouse, resize).
 const STDIN_CHANNEL_CAPACITY: usize = 256;
-
-/// Channel capacity for resize signal notifications.
-const RESIZE_CHANNEL_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone, Args)]
 pub struct AttachArgs {
@@ -45,6 +42,11 @@ pub struct AttachArgs {
 pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
     let pairing = resolve_pairing(&args)?;
     let _raw_mode = RawModeGuard::new()?;
+
+    // Enable mouse capture so mouse events from the user's terminal are forwarded
+    // to the remote host. This allows TUI apps (OpenCode, etc.) to receive clicks,
+    // drags, scrolls, etc.
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
 
     let local_key = generate_key_pair();
     let local_fingerprint = fingerprint(&local_key.public);
@@ -66,38 +68,56 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(STDIN_CHANNEL_CAPACITY);
-    tokio::spawn(async move {
-        let mut buf = [0_u8; crate::constants::READ_BUFFER_SIZE];
+    // Input events from crossterm (keyboard, mouse, resize) — replaces raw stdin reader.
+    enum InputEvent {
+        Key(Vec<u8>),
+        Resize(u16, u16),
+        Detach,
+    }
+    let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(STDIN_CHANNEL_CAPACITY);
+    let input_task = tokio::task::spawn_blocking(move || {
+        use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+
         loop {
-            match stdin.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if stdin_tx.send(buf[..n].to_vec()).await.is_err() {
-                        break;
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                match event::read() {
+                    Ok(Event::Key(key)) => {
+                        // Ctrl-C detaches the attach client without stopping the host.
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            let _ = input_tx.blocking_send(InputEvent::Detach);
+                            break;
+                        }
+
+                        if let Some(bytes) = crate::input::key_to_bytes(&key)
+                            && input_tx.blocking_send(InputEvent::Key(bytes)).is_err()
+                        {
+                            break;
+                        }
                     }
+                    Ok(Event::Mouse(mouse)) => {
+                        if let Some(bytes) = crate::input::mouse_to_bytes(&mouse)
+                            && input_tx.blocking_send(InputEvent::Key(bytes)).is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Event::Resize(cols, rows)) => {
+                        if input_tx
+                            .blocking_send(InputEvent::Resize(cols, rows))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
-                Err(_) => break,
             }
         }
     });
 
-    let (resize_tx, mut resize_rx) = mpsc::channel::<()>(RESIZE_CHANNEL_CAPACITY);
-    #[cfg(unix)]
-    {
-        let mut resize_signal =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-                .context("failed to subscribe to SIGWINCH")?;
-        tokio::spawn(async move {
-            while resize_signal.recv().await.is_some() {
-                if resize_tx.send(()).await.is_err() {
-                    break;
-                }
-            }
-        });
-    }
+    let mut stdout = tokio::io::stdout();
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -108,18 +128,26 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
 
     loop {
         tokio::select! {
-            local_input = stdin_rx.recv() => {
-                let Some(bytes) = local_input else { continue; };
-                // Ctrl-C (0x03) detaches the attach client without stopping the host.
-                if bytes == [0x03] {
-                    let mut stdout = tokio::io::stdout();
-                    stdout.write_all(b"\r\n[detached]\r\n").await?;
-                    stdout.flush().await?;
-                    break;
-                }
-                if let Some(channel) = chan.confirmed_channel() {
-                    let sealed = channel.seal(&SecureMessage::PtyInput(bytes))?;
-                    send_peer_frame(&relay_tx, &pairing.session_id, PeerFrame::Secure(sealed))?;
+            local_input = input_rx.recv() => {
+                match local_input {
+                    Some(InputEvent::Key(bytes)) => {
+                        if let Some(channel) = chan.confirmed_channel() {
+                            let sealed = channel.seal(&SecureMessage::PtyInput(bytes))?;
+                            send_peer_frame(&relay_tx, &pairing.session_id, PeerFrame::Secure(sealed))?;
+                        }
+                    }
+                    Some(InputEvent::Resize(cols, rows)) => {
+                        if let Some(channel) = chan.confirmed_channel() {
+                            let sealed = channel.seal(&SecureMessage::Resize { cols, rows })?;
+                            send_peer_frame(&relay_tx, &pairing.session_id, PeerFrame::Secure(sealed))?;
+                        }
+                    }
+                    Some(InputEvent::Detach) | None => {
+                        let mut stdout = tokio::io::stdout();
+                        stdout.write_all(b"\r\n[detached]\r\n").await?;
+                        stdout.flush().await?;
+                        break;
+                    }
                 }
             }
             inbound = relay.recv() => {
@@ -188,21 +216,19 @@ pub async fn run_attach(args: AttachArgs) -> anyhow::Result<()> {
                 let _ = relay_tx.try_send(RelayMessage::Ping(now_millis()));
                 send_resize(&relay_tx, &pairing.session_id, &mut chan)?;
             }
-            resize_event = resize_rx.recv() => {
-                if resize_event.is_none() {
-                    continue;
-                }
-                send_resize(&relay_tx, &pairing.session_id, &mut chan)?;
-            }
             _ = &mut shutdown => {
                 break;
             }
         }
     }
 
+    // Clean up: disable mouse capture, reset terminal state.
+    input_task.abort();
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
+
     // Reset terminal state before dropping raw mode:
     // - Exit alternate screen buffer (in case the tool used it)
-    // - Disable mouse tracking
+    // - Disable mouse tracking (belt-and-suspenders with DECSET sequences)
     // - Reset all attributes
     {
         let mut stdout = tokio::io::stdout();
