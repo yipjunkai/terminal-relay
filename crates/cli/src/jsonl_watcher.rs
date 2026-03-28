@@ -20,7 +20,7 @@ use std::{
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use protocol::protocol::AgentEvent;
+use protocol::AgentEvent;
 
 // ── Public types ────────────────────────────────────────────────────────
 

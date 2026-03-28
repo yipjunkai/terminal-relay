@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CoreError, CoreResult};
+use crate::error::{Error, Result};
 
 /// Current protocol version. Bump when adding breaking wire format changes.
 pub const PROTOCOL_VERSION: u16 = 2;
@@ -284,40 +284,40 @@ pub enum SecureMessage {
 
 // ── Generic MessagePack encode/decode ────────────────────────────────────
 
-fn encode<T: Serialize>(value: &T) -> CoreResult<Vec<u8>> {
-    rmp_serde::to_vec_named(value).map_err(|err| CoreError::Serialization(err.to_string()))
+fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    rmp_serde::to_vec_named(value).map_err(|err| Error::Serialization(err.to_string()))
 }
 
-fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> CoreResult<T> {
-    rmp_serde::from_slice(bytes).map_err(|err| CoreError::Deserialization(err.to_string()))
+fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
+    rmp_serde::from_slice(bytes).map_err(|err| Error::Deserialization(err.to_string()))
 }
 
 // ── Type-specific wrappers (preserve the public API) ────────────────────
 
-pub fn encode_relay(message: &RelayMessage) -> CoreResult<Vec<u8>> {
+pub fn encode_relay(message: &RelayMessage) -> Result<Vec<u8>> {
     encode(message)
 }
 
-pub fn decode_relay(bytes: &[u8]) -> CoreResult<RelayMessage> {
+pub fn decode_relay(bytes: &[u8]) -> Result<RelayMessage> {
     decode(bytes)
 }
 
-pub fn encode_peer_frame(frame: &PeerFrame) -> CoreResult<Vec<u8>> {
+pub fn encode_peer_frame(frame: &PeerFrame) -> Result<Vec<u8>> {
     encode(frame)
 }
 
-pub fn decode_peer_frame(bytes: &[u8]) -> CoreResult<PeerFrame> {
+pub fn decode_peer_frame(bytes: &[u8]) -> Result<PeerFrame> {
     decode(bytes)
 }
 
-pub fn encode_secure_message(message: &SecureMessage) -> CoreResult<Vec<u8>> {
+pub fn encode_secure_message(message: &SecureMessage) -> Result<Vec<u8>> {
     encode(message)
 }
 
 /// Decode a `SecureMessage`, falling back to `SecureMessage::Unknown` for unrecognized variants.
 /// This provides forward compatibility: older clients receiving messages with new variant
 /// discriminants will get `Unknown` instead of a deserialization error.
-pub fn decode_secure_message(bytes: &[u8]) -> CoreResult<SecureMessage> {
+pub fn decode_secure_message(bytes: &[u8]) -> Result<SecureMessage> {
     match rmp_serde::from_slice(bytes) {
         Ok(message) => Ok(message),
         Err(_) => Ok(SecureMessage::Unknown(bytes.to_vec())),

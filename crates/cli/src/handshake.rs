@@ -6,11 +6,9 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use protocol::{
+    Handshake, HandshakeConfirm, PeerFrame, PeerRole, RegisterResponse, RelayMessage, RelayRoute,
     crypto::{HANDSHAKE_MAX_AGE_MS, SecureChannel, compute_handshake_mac, derive_session_keys},
-    protocol::{
-        Handshake, HandshakeConfirm, PeerFrame, PeerRole, RelayMessage, RelayRoute,
-        encode_peer_frame,
-    },
+    encode_peer_frame,
 };
 
 use crate::relay_client::RelayConnection;
@@ -149,10 +147,10 @@ pub const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 pub async fn reconnect_with_backoff<F, Fut>(
     label: &str,
     mut connect_fn: F,
-) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)>
+) -> anyhow::Result<(RelayConnection, RegisterResponse)>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)>>,
+    Fut: Future<Output = anyhow::Result<(RelayConnection, RegisterResponse)>>,
 {
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=MAX_RECONNECT_ATTEMPTS {

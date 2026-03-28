@@ -12,15 +12,15 @@ use tracing::{info, warn};
 use crate::tui::{self, LogLevel, PeerStatus, SessionInfo, Tui, TuiAction, TuiState};
 
 use protocol::{
+    AgentCommand, AgentEvent, PeerFrame, PeerRole, PushNotification, RegisterRequest,
+    RegisterResponse, RelayMessage, RelayRoute, SecureMessage, PROTOCOL_VERSION,
+    PROTOCOL_VERSION_MIN,
     crypto::{fingerprint, generate_key_pair},
+    decode_peer_frame,
     pairing::{PairingUri, build_pairing_uri, new_pairing_code, new_session_id},
-    protocol::{
-        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole, RegisterRequest, RelayMessage,
-        RelayRoute, SecureMessage, decode_peer_frame,
-    },
 };
 
-use crate::common::{
+use crate::handshake::{
     ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff, send_handshake,
     send_peer_frame, shutdown_signal, verify_handshake_confirm,
 };
@@ -44,7 +44,7 @@ struct HostContext {
     tui_state: TuiState,
     /// In API mode, commands from the mobile client are forwarded here
     /// instead of being injected into a PTY.
-    command_tx: Option<mpsc::Sender<protocol::protocol::AgentCommand>>,
+    command_tx: Option<mpsc::Sender<AgentCommand>>,
     /// In API mode, info needed for takeover (spawning `opencode attach`).
     api_info: Option<ApiInfo>,
 }
@@ -231,9 +231,9 @@ async fn run_single_host_session(params: HostSessionParams) -> anyhow::Result<()
     let mut pty: Option<PtySession> = None;
     let mut output_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
     let mut exit_rx: Option<tokio::sync::oneshot::Receiver<i32>> = None;
-    let mut event_rx: Option<mpsc::Receiver<protocol::protocol::AgentEvent>> = None;
+    let mut event_rx: Option<mpsc::Receiver<AgentEvent>> = None;
     let mut watcher_log_rx: Option<mpsc::Receiver<String>> = None;
-    let mut command_tx: Option<mpsc::Sender<protocol::protocol::AgentCommand>> = None;
+    let mut command_tx: Option<mpsc::Sender<AgentCommand>> = None;
     let mut api_info: Option<ApiInfo> = None;
     let mut adapter: Option<OpenCodeAdapter> = None;
     let mut stream_ended_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
@@ -634,7 +634,7 @@ fn handle_route(
             }
 
             ctx.send_secure(&SecureMessage::Notification(
-                protocol::protocol::PushNotification {
+                PushNotification {
                     title: format!("Connected to {}", ctx.identity.tool_name),
                     body: "Session encryption established".to_string(),
                 },
@@ -644,7 +644,7 @@ fn handle_route(
             // immediately switches to structured view (no PTY output to display).
             if ctx.api_info.is_some() {
                 ctx.send_secure(&SecureMessage::AgentEvent(
-                    protocol::protocol::AgentEvent::SessionInit {
+                    AgentEvent::SessionInit {
                         session_id: ctx.identity.session_id.clone(),
                         model: "opencode".to_string(),
                         tools: vec![],
@@ -671,7 +671,7 @@ fn handle_route(
                 SecureMessage::VoiceCommand(action) => {
                     if let Some(ref cmd_tx) = ctx.command_tx {
                         // API mode: send as a structured prompt.
-                        let _ = cmd_tx.try_send(protocol::protocol::AgentCommand::Prompt {
+                        let _ = cmd_tx.try_send(AgentCommand::Prompt {
                             text: action.transcript,
                         });
                     } else if let Some(pty) = pty {
@@ -685,16 +685,16 @@ fn handle_route(
                     } else if let Some(pty) = pty {
                         // PTY mode: inject into the PTY as keystrokes.
                         match cmd {
-                            protocol::protocol::AgentCommand::Prompt { text } => {
+                            AgentCommand::Prompt { text } => {
                                 pty.send_input(format!("{text}\r").into_bytes())?;
                             }
-                            protocol::protocol::AgentCommand::ApproveToolUse { .. } => {
+                            AgentCommand::ApproveToolUse { .. } => {
                                 pty.send_input(b"y\r".to_vec())?;
                             }
-                            protocol::protocol::AgentCommand::DenyToolUse { .. } => {
+                            AgentCommand::DenyToolUse { .. } => {
                                 pty.send_input(b"n\r".to_vec())?;
                             }
-                            protocol::protocol::AgentCommand::AbortSession => {
+                            AgentCommand::AbortSession => {
                                 pty.send_input(vec![0x03])?;
                             }
                         }
@@ -724,7 +724,7 @@ fn handle_route(
 async fn run_takeover(
     pty: &PtySession,
     output_rx: &mut mpsc::Receiver<Vec<u8>>,
-    event_rx: &mut Option<mpsc::Receiver<protocol::protocol::AgentEvent>>,
+    event_rx: &mut Option<mpsc::Receiver<AgentEvent>>,
     watcher_log_rx: &mut Option<mpsc::Receiver<String>>,
     relay: &mut RelayConnection,
     ctx: &mut HostContext,
@@ -919,7 +919,7 @@ enum TakeoverApiExit {
 
 async fn run_takeover_api(
     info: &ApiInfo,
-    event_rx: &mut Option<mpsc::Receiver<protocol::protocol::AgentEvent>>,
+    event_rx: &mut Option<mpsc::Receiver<AgentEvent>>,
     watcher_log_rx: &mut Option<mpsc::Receiver<String>>,
     relay: &mut RelayConnection,
     ctx: &mut HostContext,
@@ -1128,7 +1128,7 @@ async fn connect_host(
     pairing_code: &str,
     resume_token: Option<String>,
     api_key: Option<&str>,
-) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
+) -> anyhow::Result<(RelayConnection, RegisterResponse)> {
     RelayConnection::connect(
         relay_url,
         RegisterRequest {
@@ -1151,7 +1151,7 @@ async fn reconnect_host(
     pairing_code: &str,
     resume_token: &str,
     api_key: Option<&str>,
-) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
+) -> anyhow::Result<(RelayConnection, RegisterResponse)> {
     reconnect_with_backoff("host", || {
         connect_host(
             relay_url,

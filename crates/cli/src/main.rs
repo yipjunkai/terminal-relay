@@ -2,7 +2,7 @@
 mod account;
 mod ai_tools;
 mod attach;
-mod common;
+mod handshake;
 mod config;
 mod constants;
 mod host;

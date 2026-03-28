@@ -1,14 +1,17 @@
 use protocol::{
     crypto::{compute_handshake_mac, derive_session_keys, fingerprint, verify_handshake_mac},
-    pairing::{PairingUri, build_pairing_uri, parse_pairing_uri},
-    protocol::*,
+    encode_peer_frame, encode_relay, encode_secure_message,
+    pairing::{build_pairing_uri, parse_pairing_uri, PairingUri},
+    Handshake, HandshakeConfirm, PeerFrame, PeerRole, PeerStatus, RegisterRequest,
+    RegisterResponse, RelayError, RelayMessage, RelayRoute, SealedFrame, SecureMessage,
+    VoiceAction,
 };
 /// Generates deterministic test vectors for cross-platform compatibility testing.
 /// Run with: cargo test -p protocol --test generate_test_vectors -- --nocapture
 ///
 /// The output JSON can be saved and used by Dart, Swift, Kotlin tests to verify
 /// wire-compatible encoding/decoding and identical crypto outputs.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 // ---------------------------------------------------------------------------

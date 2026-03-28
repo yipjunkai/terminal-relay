@@ -1,8 +1,8 @@
-use rand::{Rng, distributions::Alphanumeric, thread_rng};
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use url::Url;
 use uuid::Uuid;
 
-use crate::{error::CoreError, error::CoreResult};
+use crate::{error::Error, error::Result};
 
 #[derive(Clone)]
 pub struct PairingUri {
@@ -46,8 +46,8 @@ pub fn new_pairing_code() -> String {
     chunks.join("-")
 }
 
-pub fn build_pairing_uri(pairing: &PairingUri) -> CoreResult<String> {
-    let mut url = Url::parse("farwatch://pair").map_err(|_| CoreError::InvalidPairingUri)?;
+pub fn build_pairing_uri(pairing: &PairingUri) -> Result<String> {
+    let mut url = Url::parse("farwatch://pair").map_err(|_| Error::InvalidPairingUri)?;
     url.query_pairs_mut()
         .append_pair("relay", &pairing.relay_url)
         .append_pair("session", &pairing.session_id)
@@ -65,10 +65,10 @@ pub fn build_pairing_uri(pairing: &PairingUri) -> CoreResult<String> {
     Ok(url.to_string())
 }
 
-pub fn parse_pairing_uri(input: &str) -> CoreResult<PairingUri> {
-    let url = Url::parse(input).map_err(|_| CoreError::InvalidPairingUri)?;
+pub fn parse_pairing_uri(input: &str) -> Result<PairingUri> {
+    let url = Url::parse(input).map_err(|_| Error::InvalidPairingUri)?;
     if url.scheme() != "farwatch" || url.host_str() != Some("pair") {
-        return Err(CoreError::InvalidPairingUri);
+        return Err(Error::InvalidPairingUri);
     }
 
     let mut relay_url = None;
@@ -89,9 +89,9 @@ pub fn parse_pairing_uri(input: &str) -> CoreResult<PairingUri> {
     }
 
     Ok(PairingUri {
-        relay_url: relay_url.ok_or(CoreError::InvalidPairingUri)?,
-        session_id: session_id.ok_or(CoreError::InvalidPairingUri)?,
-        pairing_code: pairing_code.ok_or(CoreError::InvalidPairingUri)?,
+        relay_url: relay_url.ok_or(Error::InvalidPairingUri)?,
+        session_id: session_id.ok_or(Error::InvalidPairingUri)?,
+        pairing_code: pairing_code.ok_or(Error::InvalidPairingUri)?,
         expected_fingerprint,
         api_key,
     })

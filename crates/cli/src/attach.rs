@@ -8,15 +8,14 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use protocol::{
+    PeerFrame, PeerRole, RegisterRequest, RegisterResponse, RelayMessage, RelayRoute,
+    SecureMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN,
     crypto::{fingerprint, generate_key_pair},
+    decode_peer_frame,
     pairing::{PairingUri, parse_pairing_uri},
-    protocol::{
-        PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, PeerFrame, PeerRole, RegisterRequest, RelayMessage,
-        RelayRoute, SecureMessage, decode_peer_frame,
-    },
 };
 
-use crate::common::{
+use crate::handshake::{
     ChannelState, now_millis, process_inbound_handshake, reconnect_with_backoff, send_handshake,
     send_peer_frame, shutdown_signal, verify_handshake_confirm,
 };
@@ -403,7 +402,7 @@ fn resolve_pairing(args: &AttachArgs) -> anyhow::Result<PairingUri> {
 async fn connect_client(
     pairing: &PairingUri,
     resume_token: Option<String>,
-) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
+) -> anyhow::Result<(RelayConnection, RegisterResponse)> {
     RelayConnection::connect(
         &pairing.relay_url,
         RegisterRequest {
@@ -423,7 +422,7 @@ async fn connect_client(
 async fn reconnect_client(
     pairing: &PairingUri,
     resume_token: &str,
-) -> anyhow::Result<(RelayConnection, protocol::protocol::RegisterResponse)> {
+) -> anyhow::Result<(RelayConnection, RegisterResponse)> {
     reconnect_with_backoff("client", || {
         connect_client(pairing, Some(resume_token.to_string()))
     })

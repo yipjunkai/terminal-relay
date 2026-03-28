@@ -6,9 +6,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
 
-use protocol::protocol::{
-    RegisterRequest, RegisterResponse, RelayMessage, decode_relay, encode_relay,
-};
+use protocol::{RegisterRequest, RegisterResponse, RelayMessage, decode_relay, encode_relay};
 
 /// Timeout for the initial WebSocket connect + registration exchange.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);

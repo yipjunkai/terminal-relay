@@ -1,9 +1,9 @@
-use thiserror::Error;
+use thiserror::Error as ThisError;
 
-pub type CoreResult<T> = Result<T, CoreError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Error)]
-pub enum CoreError {
+#[derive(Debug, ThisError)]
+pub enum Error {
     #[error("serialization failed: {0}")]
     Serialization(String),
     #[error("deserialization failed: {0}")]

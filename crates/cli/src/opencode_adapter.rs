@@ -17,7 +17,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use protocol::protocol::{AgentCommand, AgentEvent, TodoItem};
+use protocol::{AgentCommand, AgentEvent, TodoItem};
 
 use crate::constants;
 

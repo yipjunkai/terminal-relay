@@ -9,10 +9,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    error::{CoreError, CoreResult},
-    protocol::{
-        PeerRole, SealedFrame, SecureMessage, decode_secure_message, encode_secure_message,
-    },
+    error::{Error, Result},
+    wire::{PeerRole, SealedFrame, SecureMessage, decode_secure_message, encode_secure_message},
 };
 
 /// X25519 key pair. Not `Clone` — secret material should not be casually duplicated.
@@ -55,22 +53,22 @@ impl SecureChannel {
         }
     }
 
-    pub fn seal(&mut self, message: &SecureMessage) -> CoreResult<SealedFrame> {
+    pub fn seal(&mut self, message: &SecureMessage) -> Result<SealedFrame> {
         let plaintext = encode_secure_message(message)?;
         let nonce = self.tx_nonce;
         self.tx_nonce = self
             .tx_nonce
             .checked_add(1)
-            .ok_or(CoreError::InvalidMessage("nonce exhausted"))?;
+            .ok_or(Error::InvalidMessage("nonce exhausted"))?;
         let ciphertext = encrypt(&self.tx_key, nonce, &plaintext)?;
         Ok(SealedFrame { nonce, ciphertext })
     }
 
-    pub fn open(&mut self, frame: &SealedFrame) -> CoreResult<SecureMessage> {
+    pub fn open(&mut self, frame: &SealedFrame) -> Result<SecureMessage> {
         if let Some(last_seen) = self.last_rx_nonce
             && frame.nonce <= last_seen
         {
-            return Err(CoreError::ReplayDetected);
+            return Err(Error::ReplayDetected);
         }
         let plaintext = decrypt(&self.rx_key, frame.nonce, &frame.ciphertext)?;
         self.last_rx_nonce = Some(frame.nonce);
@@ -91,7 +89,7 @@ pub fn derive_session_keys(
     session_id: &str,
     local_secret: [u8; 32],
     remote_public: [u8; 32],
-) -> CoreResult<SessionKeys> {
+) -> Result<SessionKeys> {
     let local = StaticSecret::from(local_secret);
     let remote = PublicKey::from(remote_public);
     let shared = local.diffie_hellman(&remote);
@@ -99,7 +97,7 @@ pub fn derive_session_keys(
     let hk = Hkdf::<Sha256>::new(Some(session_id.as_bytes()), shared.as_bytes());
     let mut okm = [0_u8; 64];
     hk.expand(b"farwatch/v1/channel-keys", &mut okm)
-        .map_err(|_| CoreError::CryptoFailure)?;
+        .map_err(|_| Error::CryptoFailure)?;
 
     let mut first = [0_u8; 32];
     let mut second = [0_u8; 32];
@@ -160,7 +158,7 @@ pub fn verify_handshake_mac(
     local_public: &[u8; 32],
     session_id: &str,
     received_mac: &[u8; 32],
-) -> CoreResult<()> {
+) -> Result<()> {
     use hmac::{Hmac, Mac};
 
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(rx_key).expect("HMAC accepts any key size");
@@ -168,23 +166,23 @@ pub fn verify_handshake_mac(
     mac.update(local_public);
     mac.update(session_id.as_bytes());
     mac.verify_slice(received_mac)
-        .map_err(|_| CoreError::CryptoFailure)
+        .map_err(|_| Error::CryptoFailure)
 }
 
-fn encrypt(key: &[u8; 32], counter: u64, plaintext: &[u8]) -> CoreResult<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CoreError::CryptoFailure)?;
+fn encrypt(key: &[u8; 32], counter: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::CryptoFailure)?;
     let nonce = nonce_from_counter(counter);
     cipher
         .encrypt(&nonce.into(), plaintext)
-        .map_err(|_| CoreError::CryptoFailure)
+        .map_err(|_| Error::CryptoFailure)
 }
 
-fn decrypt(key: &[u8; 32], counter: u64, ciphertext: &[u8]) -> CoreResult<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CoreError::CryptoFailure)?;
+fn decrypt(key: &[u8; 32], counter: u64, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::CryptoFailure)?;
     let nonce = nonce_from_counter(counter);
     cipher
         .decrypt(&nonce.into(), ciphertext)
-        .map_err(|_| CoreError::CryptoFailure)
+        .map_err(|_| Error::CryptoFailure)
 }
 
 fn nonce_from_counter(counter: u64) -> [u8; 12] {
@@ -196,7 +194,7 @@ fn nonce_from_counter(counter: u64) -> [u8; 12] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::SecureMessage;
+    use crate::wire::SecureMessage;
 
     /// Helper: create a Host/Client SecureChannel pair from a fresh key exchange.
     fn make_channel_pair() -> (SecureChannel, SecureChannel) {
@@ -276,7 +274,7 @@ mod tests {
             SecureMessage::VersionNotice {
                 minimum_version: "0.2.0".to_string(),
             },
-            SecureMessage::Notification(crate::protocol::PushNotification {
+            SecureMessage::Notification(crate::wire::PushNotification {
                 title: "Test".to_string(),
                 body: "Hello".to_string(),
             }),
@@ -285,7 +283,7 @@ mod tests {
                 content: "hello".to_string(),
             },
             SecureMessage::ReadOnly { enabled: true },
-            SecureMessage::VoiceCommand(crate::protocol::VoiceAction {
+            SecureMessage::VoiceCommand(crate::wire::VoiceAction {
                 transcript: "refactor this function".to_string(),
                 intent: Some("refactor".to_string()),
                 confidence: 0.95,
@@ -311,7 +309,7 @@ mod tests {
 
         // Replaying the same frame fails
         let err = client.open(&sealed).unwrap_err();
-        assert!(matches!(err, CoreError::ReplayDetected));
+        assert!(matches!(err, Error::ReplayDetected));
     }
 
     #[test]
@@ -328,11 +326,11 @@ mod tests {
         // frame0 and frame1 should be rejected (nonce <= last_seen)
         assert!(matches!(
             client.open(&frame0),
-            Err(CoreError::ReplayDetected)
+            Err(Error::ReplayDetected)
         ));
         assert!(matches!(
             client.open(&frame1),
-            Err(CoreError::ReplayDetected)
+            Err(Error::ReplayDetected)
         ));
     }
 
