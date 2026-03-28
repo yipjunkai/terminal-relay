@@ -688,8 +688,8 @@ fn map_tool_part(part: &serde_json::Value) -> Vec<AgentEvent> {
                 .unwrap_or("")
                 .to_string();
             // Truncate large outputs
-            if content.len() > constants::OPENCODE_MAX_RESULT_LEN {
-                content.truncate(constants::OPENCODE_MAX_RESULT_LEN);
+            if content.len() > constants::MAX_RESULT_LEN {
+                content.truncate(constants::MAX_RESULT_LEN);
                 content.push_str("\n... (truncated)");
             }
             vec![AgentEvent::ToolResult {

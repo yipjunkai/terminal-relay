@@ -716,6 +716,122 @@ fn handle_route(
     Ok(())
 }
 
+// ── Shared takeover terminal management ─────────────────────────────────
+
+/// Events produced by the takeover input reader.
+enum TakeoverInput {
+    /// Keyboard or mouse input converted to PTY-compatible bytes.
+    Key(Vec<u8>),
+    /// Terminal window was resized.
+    Resize(u16, u16),
+}
+
+/// Manages terminal state and input reading during takeover mode.
+///
+/// Enters raw mode with mouse capture on creation, spawns a blocking task
+/// to read keyboard/mouse/resize events (with double-tap Esc detection),
+/// and restores the terminal on [`stop`].
+struct TakeoverTerminal {
+    input_rx: mpsc::Receiver<TakeoverInput>,
+    stdin_task: tokio::task::JoinHandle<()>,
+}
+
+impl TakeoverTerminal {
+    /// Enter takeover mode and start reading terminal input.
+    ///
+    /// Enables raw mode and mouse capture, triggers a PTY redraw
+    /// (resize + Ctrl-L), and spawns the input reader task.
+    async fn start(pty: &PtySession) -> anyhow::Result<Self> {
+        use crossterm::terminal::enable_raw_mode;
+
+        enable_raw_mode()?;
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+
+        // Force the TUI app to redraw by toggling the terminal size
+        // (guarantees SIGWINCH) then sending Ctrl-L.
+        if let Ok((cols, rows)) = crossterm::terminal::size() {
+            let _ = pty.resize(cols.saturating_sub(1).max(1), rows);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = pty.resize(cols, rows);
+        }
+        let _ = pty.send_input(vec![0x0c]); // Ctrl-L
+
+        let (key_tx, input_rx) = mpsc::channel::<TakeoverInput>(64);
+        let stdin_task = tokio::task::spawn_blocking(move || {
+            use crossterm::event::{self, Event, KeyCode};
+            use std::time::Instant;
+
+            let mut last_esc: Option<Instant> = None;
+            let double_tap_ms = crate::constants::DOUBLE_TAP_ESC_MS;
+
+            loop {
+                if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                    match event::read() {
+                        Ok(Event::Resize(cols, rows)) => {
+                            if key_tx
+                                .blocking_send(TakeoverInput::Resize(cols, rows))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Ok(Event::Key(key)) => {
+                            // Double-tap Esc = exit takeover.
+                            if key.code == KeyCode::Esc {
+                                if let Some(prev) = last_esc
+                                    && prev.elapsed().as_millis() < double_tap_ms
+                                {
+                                    break;
+                                }
+                                last_esc = Some(Instant::now());
+                                // Still send the first Esc to the PTY.
+                                if key_tx
+                                    .blocking_send(TakeoverInput::Key(vec![0x1b]))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                            last_esc = None;
+
+                            let Some(bytes) = crate::input::key_to_bytes(&key) else {
+                                continue;
+                            };
+                            if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Event::Mouse(mouse)) => {
+                            let Some(bytes) = crate::input::mouse_to_bytes(&mouse) else {
+                                continue;
+                            };
+                            if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        Ok(Self { input_rx, stdin_task })
+    }
+
+    /// Exit takeover mode: abort the input reader and restore the terminal.
+    fn stop(self) -> anyhow::Result<()> {
+        use crossterm::terminal::disable_raw_mode;
+
+        self.stdin_task.abort();
+        crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
+        disable_raw_mode()?;
+        Ok(())
+    }
+}
+
+// ── Takeover mode implementations ───────────────────────────────────────
+
 /// Takeover mode (PTY): the desktop user directly interacts with the PTY.
 ///
 /// The TUI is suspended. PTY output goes to stdout (so the user sees Claude
@@ -729,96 +845,10 @@ async fn run_takeover(
     relay: &mut RelayConnection,
     ctx: &mut HostContext,
 ) -> anyhow::Result<()> {
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use tokio::io::{AsyncWriteExt, stdout};
 
-    // Enter raw mode for direct keyboard passthrough.
-    enable_raw_mode()?;
-
+    let mut terminal = TakeoverTerminal::start(pty).await?;
     let mut out = stdout();
-
-    // Force the TUI app to redraw by resizing the PTY to the current
-    // terminal size (shrink then restore to guarantee SIGWINCH) and
-    // sending Ctrl+L (universal "redraw screen" in TUI apps).
-    if let Ok((cols, rows)) = crossterm::terminal::size() {
-        let _ = pty.resize(cols.saturating_sub(1).max(1), rows);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = pty.resize(cols, rows);
-    }
-    let _ = pty.send_input(vec![0x0c]); // Ctrl+L
-
-    // Spawn a blocking task to read stdin keypresses and resize events.
-    enum TakeoverInput {
-        Key(Vec<u8>),
-        Resize(u16, u16),
-    }
-    let (key_tx, mut key_rx) = mpsc::channel::<TakeoverInput>(64);
-    // Enable mouse capture so TUI apps (OpenCode, etc.) that request
-    // mouse mode via DECSET actually receive mouse events.
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-
-    let stdin_task = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode};
-        use std::time::Instant;
-
-        let mut last_esc: Option<Instant> = None;
-        let double_tap_ms = crate::constants::DOUBLE_TAP_ESC_MS;
-
-        loop {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                match event::read() {
-                    Ok(Event::Resize(cols, rows)) => {
-                        if key_tx
-                            .blocking_send(TakeoverInput::Resize(cols, rows))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(Event::Key(key)) => {
-                        // Double-tap Esc = exit takeover.
-                        if key.code == KeyCode::Esc {
-                            if let Some(prev) = last_esc
-                                && prev.elapsed().as_millis() < double_tap_ms
-                            {
-                                break;
-                            }
-                            last_esc = Some(Instant::now());
-                            // Still send the first Esc to the PTY.
-                            if key_tx
-                                .blocking_send(TakeoverInput::Key(vec![0x1b]))
-                                .is_err()
-                            {
-                                break;
-                            }
-                            continue;
-                        }
-                        last_esc = None;
-
-                        // Convert key event to bytes for the PTY.
-                        let Some(bytes) = crate::input::key_to_bytes(&key) else {
-                            continue;
-                        };
-
-                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Event::Mouse(mouse)) => {
-                        // Forward all mouse events as SGR escape sequences so
-                        // TUI apps (OpenCode, etc.) can handle them natively.
-                        let Some(bytes) = crate::input::mouse_to_bytes(&mouse) else {
-                            continue;
-                        };
-                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    });
 
     // Main takeover loop: PTY I/O + relay + watcher + heartbeat.
     let mut heartbeat = tokio::time::interval(Duration::from_secs(
@@ -839,7 +869,7 @@ async fn run_takeover(
                 }
             }
             // ── Keyboard + resize → PTY ──
-            input = key_rx.recv() => {
+            input = terminal.input_rx.recv() => {
                 match input {
                     Some(TakeoverInput::Key(bytes)) => {
                         pty.send_input(bytes)?;
@@ -891,11 +921,7 @@ async fn run_takeover(
         }
     }
 
-    // Clean up: abort stdin task, disable mouse capture, restore terminal.
-    stdin_task.abort();
-    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
-    disable_raw_mode()?;
-
+    terminal.stop()?;
     Ok(())
 }
 
@@ -925,7 +951,6 @@ async fn run_takeover_api(
     ctx: &mut HostContext,
     stream_ended_rx: &mut Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> anyhow::Result<TakeoverApiExit> {
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use tokio::io::{AsyncWriteExt, stdout};
 
     // Spawn `opencode attach` in a PTY so we own the terminal I/O.
@@ -944,88 +969,8 @@ async fn run_takeover_api(
     let mut attach_output_rx = attach_streams.output_rx;
     let mut attach_exit_rx = attach_streams.exit_rx;
 
-    // Enter raw mode for direct keyboard passthrough.
-    enable_raw_mode()?;
-
-    // Enable mouse capture so TUI apps receive mouse events.
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-
+    let mut terminal = TakeoverTerminal::start(&attach_pty).await?;
     let mut out = stdout();
-
-    // Trigger redraw: resize + Ctrl-L.
-    if let Ok((cols, rows)) = crossterm::terminal::size() {
-        let _ = attach_pty.resize(cols.saturating_sub(1).max(1), rows);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = attach_pty.resize(cols, rows);
-    }
-    let _ = attach_pty.send_input(vec![0x0c]); // Ctrl+L
-
-    // Spawn keyboard reader (same pattern as PTY takeover).
-    enum TakeoverInput {
-        Key(Vec<u8>),
-        Resize(u16, u16),
-    }
-    let (key_tx, mut key_rx) = mpsc::channel::<TakeoverInput>(64);
-    let stdin_task = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode};
-        use std::time::Instant;
-
-        let mut last_esc: Option<Instant> = None;
-        let double_tap_ms = crate::constants::DOUBLE_TAP_ESC_MS;
-
-        loop {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                match event::read() {
-                    Ok(Event::Resize(cols, rows)) => {
-                        if key_tx
-                            .blocking_send(TakeoverInput::Resize(cols, rows))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(Event::Key(key)) => {
-                        // Double-tap Esc = exit takeover.
-                        if key.code == KeyCode::Esc {
-                            if let Some(prev) = last_esc
-                                && prev.elapsed().as_millis() < double_tap_ms
-                            {
-                                break;
-                            }
-                            last_esc = Some(Instant::now());
-                            if key_tx
-                                .blocking_send(TakeoverInput::Key(vec![0x1b]))
-                                .is_err()
-                            {
-                                break;
-                            }
-                            continue;
-                        }
-                        last_esc = None;
-
-                        let Some(bytes) = crate::input::key_to_bytes(&key) else {
-                            continue;
-                        };
-
-                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Event::Mouse(mouse)) => {
-                        // Forward all mouse events as SGR escape sequences so
-                        // TUI apps (OpenCode, etc.) can handle them natively.
-                        let Some(bytes) = crate::input::mouse_to_bytes(&mouse) else {
-                            continue;
-                        };
-                        if key_tx.blocking_send(TakeoverInput::Key(bytes)).is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    });
 
     // Main loop: PTY I/O + keyboard + SSE events + relay + heartbeat.
     let mut heartbeat = tokio::time::interval(Duration::from_secs(
@@ -1046,7 +991,7 @@ async fn run_takeover_api(
                 // events via SSE, not raw terminal output from `opencode attach`.
             }
             // ── Keyboard + resize → attach PTY ──
-            input = key_rx.recv() => {
+            input = terminal.input_rx.recv() => {
                 match input {
                     Some(TakeoverInput::Key(bytes)) => {
                         attach_pty.send_input(bytes)?;
@@ -1114,11 +1059,7 @@ async fn run_takeover_api(
         }
     }
 
-    // Clean up: disable mouse capture, abort stdin task, restore terminal.
-    stdin_task.abort();
-    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
-    disable_raw_mode()?;
-
+    terminal.stop()?;
     Ok(exit_reason)
 }
 

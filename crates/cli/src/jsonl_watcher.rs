@@ -314,9 +314,8 @@ fn parse_jsonl_line(line: &str) -> anyhow::Result<Vec<AgentEvent>> {
                             .unwrap_or_default();
                         // Cap tool result content to avoid sending huge payloads
                         // (e.g., a tool that read a large file) over the relay.
-                        const MAX_RESULT_LEN: usize = 32 * 1024; // 32 KB
-                        if result_content.len() > MAX_RESULT_LEN {
-                            result_content.truncate(MAX_RESULT_LEN);
+                        if result_content.len() > crate::constants::MAX_RESULT_LEN {
+                            result_content.truncate(crate::constants::MAX_RESULT_LEN);
                             result_content.push_str("\n... (truncated)");
                         }
                         let is_error = block

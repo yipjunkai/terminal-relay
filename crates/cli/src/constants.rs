@@ -47,6 +47,10 @@ pub const READ_BUFFER_SIZE: usize = 4096;
 /// Output backlog cap in bytes (1 MB). Oldest entries are evicted when exceeded.
 pub const OUTPUT_BACKLOG_CAP: usize = 1024 * 1024;
 
+/// Maximum tool result content length before truncation (32 KB).
+/// Used by both the JSONL watcher (Claude Code) and the OpenCode adapter.
+pub const MAX_RESULT_LEN: usize = 32 * 1024;
+
 // ── OpenCode adapter constants ──────────────────────────────────────────
 
 /// Default port for the OpenCode serve HTTP server.
@@ -57,6 +61,3 @@ pub const OPENCODE_HEALTH_TIMEOUT_SECS: u64 = 30;
 
 /// Polling interval while waiting for OpenCode server to become healthy (ms).
 pub const OPENCODE_HEALTH_POLL_MS: u64 = 200;
-
-/// Maximum tool result content length before truncation (32 KB).
-pub const OPENCODE_MAX_RESULT_LEN: usize = 32 * 1024;
