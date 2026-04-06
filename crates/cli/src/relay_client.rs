@@ -55,6 +55,11 @@ impl RelayConnection {
                      Run `farwatch auth` to re-authenticate.",
                     msg
                 )
+            } else if msg.contains("429") {
+                anyhow::anyhow!(
+                    "relay rate limit exceeded. You have too many active sessions for your plan.\n\
+                     Close an existing session or upgrade your plan, then try again."
+                )
             } else {
                 anyhow::anyhow!("failed connecting to relay url {url}: {e}")
             }
