@@ -2,7 +2,7 @@
 # Base images pinned by digest (tag kept in the comment for readability).
 # Dependabot's docker ecosystem bumps these; a digest is immutable, so the
 # build is reproducible and can't be swapped under a moved tag.
-FROM rust:1.92-slim-bookworm@sha256:f1f73538ebe623fd3673a35aff3df358ae1084c64c55646516e5b17b321b6c9b AS builder
+FROM rust:1.98-slim-bookworm@sha256:94e9efa4033213dbb70d4f665527e7ece3944ddb7ba1dd2e43f6fd6e2490af58 AS builder
 
 WORKDIR /app
 
